@@ -71,10 +71,10 @@ pub fn host_matches(host: &str, domain: &str) -> bool {
 
 impl RunConfig {
     pub fn from_settings(s: &Settings) -> RunConfig {
-        let strategies = presets::builtin_strategies();
+        let strategies = crate::base::strategies();
         let mut rules = Vec::new();
         let mut ports = Vec::new();
-        for p in presets::builtin_presets() {
+        for p in crate::base::presets() {
             if !s.enabled_presets.contains(&p.id) {
                 continue;
             }

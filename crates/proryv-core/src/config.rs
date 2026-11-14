@@ -43,6 +43,8 @@ pub struct Settings {
     pub minimize_to_tray: bool,
     pub enable_on_launch: bool,
     pub check_updates: bool,
+    /// Скачивать базу доменов, стратегий и провайдеров с GitHub при запуске.
+    pub update_base: bool,
     pub notifications: bool,
 }
 
@@ -74,6 +76,7 @@ impl Default for Settings {
             minimize_to_tray: true,
             enable_on_launch: false,
             check_updates: true,
+            update_base: true,
             notifications: true,
         }
     }

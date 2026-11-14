@@ -5,13 +5,17 @@ import { extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = join(fileURLToPath(new URL('.', import.meta.url)), '..', 'ui');
-const types = { '.html': 'text/html', '.css': 'text/css', '.js': 'text/javascript', '.svg': 'image/svg+xml', '.json': 'application/json' };
+// Промо-ролик лежит отдельно, чтобы не попасть в установщик.
+const promoRoot = join(fileURLToPath(new URL('.', import.meta.url)), '..', 'promo');
+const types = { '.html': 'text/html', '.css': 'text/css', '.js': 'text/javascript', '.mjs': 'text/javascript', '.svg': 'image/svg+xml', '.json': 'application/json', '.png': 'image/png', '.mp4': 'video/mp4' };
 const port = Number(process.env.PORT) || 5173;
 
 createServer(async (req, res) => {
   const path = normalize(decodeURIComponent(new URL(req.url, 'http://x').pathname)).replace(/^([\\/])+/, '');
-  const file = join(root, path || 'index.html');
-  if (!file.startsWith(root)) return res.writeHead(403).end();
+  const promo = path.startsWith('promo') && (path[5] === '\\' || path[5] === '/');
+  const base = promo ? promoRoot : root;
+  const file = promo ? join(promoRoot, path.slice(6)) : join(root, path || 'index.html');
+  if (!file.startsWith(base)) return res.writeHead(403).end();
   try {
     const body = await readFile(file);
     res.writeHead(200, { 'content-type': (types[extname(file)] || 'application/octet-stream') + '; charset=utf-8', 'cache-control': 'no-store' });

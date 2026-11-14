@@ -8,6 +8,7 @@
 //! - [`config`] — настройки приложения.
 
 pub mod autotune;
+pub mod base;
 pub mod config;
 pub mod engine;
 pub mod http;

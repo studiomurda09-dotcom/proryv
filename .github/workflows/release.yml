@@ -1,5 +1,5 @@
 # Сборка установщиков Windows при пуше тега вида v0.1.0.
-# Результат — черновик релиза на GitHub с .msi, -setup.exe и latest.json для автообновления.
+# Результат — опубликованный релиз на GitHub с .msi, -setup.exe и latest.json для автообновления.
 name: release
 
 on:
@@ -26,6 +26,16 @@ jobs:
 
       - run: npm ci
 
+      # Официальный WinDivert вместо копии из zapret. Хеш сверяется — подменённый архив сборку остановит.
+      - name: WinDivert 2.2.2 (официальный)
+        shell: pwsh
+        run: |
+          Invoke-WebRequest https://github.com/basil00/WinDivert/releases/download/v2.2.2/WinDivert-2.2.2-A.zip -OutFile wd.zip
+          $hash = (Get-FileHash wd.zip -Algorithm SHA256).Hash
+          if ($hash -ne "63CB41763BB4B20F600B6DE04E991A9C2BE73279E317D4D82F237B150C5F3F15") { throw "WinDivert: неверный хеш $hash" }
+          Expand-Archive wd.zip wd
+          Copy-Item wd/WinDivert-2.2.2-A/x64/WinDivert.dll, wd/WinDivert-2.2.2-A/x64/WinDivert64.sys third_party/windivert/ -Force
+
       - name: Тесты ядра
         run: cargo test -p proryv-core
 
@@ -38,7 +48,18 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "Proryv ${{ github.ref_name }}"
-          releaseBody: "Скачайте установщик для своей системы ниже. Для Windows — файл .msi или -setup.exe."
-          releaseDraft: true
+          releaseBody: |
+            ## Скачать
+            **`Proryv_…_x64-setup.exe`** — обычный установщик (рекомендуется), `.msi` — для тех, кому так привычнее.
+            Если Proryv уже стоит, обновляться не нужно: программа сама предложит обновление.
+
+            **Первый запуск:** разрешите права администратора, затем «Автоподбор» → «Подобрать» и большая кнопка на главной.
+            Если Защитник Windows ругается на драйвер WinDivert: «Подробнее» → «Выполнить в любом случае».
+            Не запускайте одновременно zapret или GoodbyeDPI.
+
+            ## Download
+            Get **`Proryv_…_x64-setup.exe`** (or the `.msi`). Existing installs update themselves from inside the app.
+            First run: allow administrator rights, then Auto-tune → Find, and press the big button on Home.
+          releaseDraft: false
           prerelease: false
           updaterJsonPreferNsis: true

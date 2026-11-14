@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "domains": {},
+  "strategies": [],
+  "isp": [
+    {
+      "asn": 50672,
+      "name": "Formula Svyazi",
+      "strategies": { "youtube": "alt11" }
+    }
+  ]
+}

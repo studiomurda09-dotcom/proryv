@@ -17,5 +17,6 @@ proryv-core = { path = "../crates/proryv-core" }
 proryv-tg = { path = "../crates/proryv-tg" }
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-updater = "2"
+tauri-plugin-notification = "2"
 serde.workspace = true
 serde_json.workspace = true

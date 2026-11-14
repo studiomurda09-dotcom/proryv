@@ -11,7 +11,6 @@ use crate::{
     config::Settings,
     engine::{Engine, RunConfig},
     platform::{self, Filter},
-    presets,
 };
 
 /// Адреса для проверки пресета: главная, CDN, медиа.
@@ -128,13 +127,13 @@ pub struct Outcome {
 /// Перебрать стратегии пресета и найти лучшую.
 /// Основной движок на время подбора должен быть остановлен.
 pub fn run(preset_id: &str, base: &Settings, mut on_progress: impl FnMut(&Progress)) -> Result<Outcome, String> {
-    let preset = presets::builtin_presets().into_iter().find(|p| p.id == preset_id).ok_or("неизвестный пресет")?;
+    let preset = crate::base::presets().into_iter().find(|p| p.id == preset_id).ok_or("неизвестный пресет")?;
     let urls = test_urls(preset_id);
     if urls.is_empty() {
         return Err("для этого пресета нет адресов проверки".into());
     }
     let names: std::collections::HashMap<String, String> =
-        presets::builtin_strategies().into_iter().map(|s| (s.id, s.name)).collect();
+        crate::base::strategies().into_iter().map(|s| (s.id, s.name)).collect();
 
     #[cfg(windows)]
     let iface = platform::windivert::direct_source_ip();
@@ -232,14 +231,14 @@ pub fn diagnose(host: &str) -> Diagnosis {
         return mk("other", "Введите адрес сайта".into(), None);
     }
     if ips.is_empty() {
-        return mk("dns", "Не удалось узнать адрес сайта (DNS). Включите защищённый DNS или проверьте имя.".into(), None);
+        return mk("dns", "Не удалось узнать адрес сайта (DNS). Проверьте имя сайта.".into(), None);
     }
     if ips.iter().any(|ip| ip.starts_with("198.18.") || ip.starts_with("198.19.")) {
         return mk("other", "Адрес выдан VPN-клиентом (fake-IP) — сайт идёт через VPN, проверить его напрямую нельзя.".into(), None);
     }
     let bogus = ips.iter().any(|ip| ip.starts_with("0.") || ip.starts_with("127.") || ip.starts_with("10.") || ip == "195.208.4.1");
     if bogus {
-        return mk("dns", format!("DNS вернул подменённый адрес ({}). Это DNS-блокировка — нужен защищённый DNS.", ips[0]), None);
+        return mk("dns", format!("DNS вернул подменённый адрес ({}). Это DNS-блокировка — включите «Безопасный DNS» в браузере или смените DNS в Windows на 1.1.1.1.", ips[0]), None);
     }
     // TCP: просто соединиться с 443 портом.
     if !tcp_connects(&ips[0], iface.as_deref()) {

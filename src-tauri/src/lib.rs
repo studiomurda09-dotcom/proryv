@@ -10,6 +10,7 @@ use std::{
 
 use proryv_core::{
     autotune::{self, Diagnosis, Outcome, Progress},
+    base,
     config::Settings,
     engine::{Engine, EngineState, RunConfig, Status},
     platform::{self, KNOWN_CONFLICTS},
@@ -170,6 +171,71 @@ struct Conflict {
     name: String,
 }
 
+// ---------------------------------------------------------------- язык и уведомления
+
+/// Английский ли интерфейс: по настройке, а для «Как в системе» — по языку Windows.
+fn is_en(state: &AppState) -> bool {
+    match state.settings.lock().unwrap().language.as_str() {
+        "en" => true,
+        "ru" => false,
+        _ => !system_is_russian(),
+    }
+}
+
+#[cfg(windows)]
+fn system_is_russian() -> bool {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetUserDefaultUILanguage() -> u16;
+    }
+    // Основной язык: русский, украинский, белорусский, казахский.
+    matches!(unsafe { GetUserDefaultUILanguage() } & 0x3ff, 0x19 | 0x22 | 0x23 | 0x3f)
+}
+#[cfg(not(windows))]
+fn system_is_russian() -> bool {
+    true
+}
+
+/// Уведомление Windows, если оно включено в настройках.
+fn notify(app: &AppHandle, title: (&str, &str), body: (String, String)) {
+    use tauri_plugin_notification::NotificationExt;
+    let state = app.state::<AppState>();
+    if !state.settings.lock().unwrap().notifications {
+        return;
+    }
+    let en = is_en(&state);
+    let _ = app
+        .notification()
+        .builder()
+        .title(if en { title.1 } else { title.0 })
+        .body(if en { body.1 } else { body.0 })
+        .show();
+}
+
+/// Название пресета для уведомления.
+fn preset_title(id: &str, en: bool) -> String {
+    let en_name = match id {
+        "general" => Some("Other blocked sites"),
+        "social" => Some("Social networks"),
+        "universal" => Some("Custom domains"),
+        _ => None,
+    };
+    match (en, en_name) {
+        (true, Some(n)) => n.to_string(),
+        _ => presets::builtin_presets().into_iter().find(|p| p.id == id).map(|p| p.name).unwrap_or_else(|| id.to_string()),
+    }
+}
+
+/// Включить обход не из окна (трей, запуск) — если не вышло, сказать уведомлением.
+fn start_engine_notify(app: &AppHandle) -> Status {
+    let st = start_engine(&app.state::<AppState>());
+    if st.state == EngineState::Error {
+        let msg = st.message.clone().unwrap_or_default();
+        notify(app, ("Обход не включился", "Bypass failed to start"), (msg.clone(), msg));
+    }
+    st
+}
+
 // ---------------------------------------------------------------- движок
 
 fn start_engine(state: &AppState) -> Status {
@@ -198,8 +264,8 @@ fn is_running(state: &AppState) -> bool {
 fn get_bootstrap(state: State<AppState>) -> Bootstrap {
     Bootstrap {
         version: proryv_core::APP_VERSION,
-        presets: presets::builtin_presets(),
-        strategies: presets::builtin_strategies(),
+        presets: base::presets(),
+        strategies: base::strategies(),
         settings: state.settings.lock().unwrap().clone(),
     }
 }
@@ -250,7 +316,7 @@ fn set_enabled(state: State<AppState>, enabled: bool) -> Status {
 /// Предпросмотр: как стратегия разрежет ClientHello для указанного сайта.
 #[tauri::command]
 fn preview_plan(host: String, strategy_id: String) -> Result<Plan, String> {
-    let strategy = presets::builtin_strategies()
+    let strategy = base::strategies()
         .into_iter()
         .find(|s| s.id == strategy_id)
         .ok_or("неизвестная стратегия")?;
@@ -327,6 +393,28 @@ fn run_tune(app: &AppHandle, preset: &str, source: &'static str) {
         start_engine(&state);
     }
     state.autotune_running.store(false, Ordering::SeqCst);
+    if source == "heal" {
+        let en = is_en(&state);
+        let name = preset_title(preset, en);
+        match res.as_ref().ok().and_then(|o| o.best.as_ref().map(|b| (b, &o.best_name))) {
+            Some((id, ru_name)) => notify(
+                app,
+                ("Самолечение", "Self-healing"),
+                (
+                    format!("{name} перестал открываться — переключили на «{}».", ru_name.as_deref().unwrap_or(id)),
+                    format!("{name} stopped opening — switched to strategy {id}."),
+                ),
+            ),
+            None => notify(
+                app,
+                ("Самолечение", "Self-healing"),
+                (
+                    format!("{name} перестал открываться, а новая стратегия не нашлась. Попробуйте автоподбор или «Диагностику»."),
+                    format!("{name} stopped opening and no new strategy was found. Try auto-tune or Diagnostics."),
+                ),
+            ),
+        }
+    }
     let _ = app.emit("autotune-done", TuneDone { source, result: res });
 }
 
@@ -475,6 +563,68 @@ fn set_backdrop(window: tauri::WebviewWindow, backdrop: String) {
     apply_backdrop(&window, &backdrop);
 }
 
+// ---------------------------------------------------------------- база и провайдер
+
+#[derive(Serialize, Clone)]
+struct IspInfo {
+    isp: Option<base::Isp>,
+    entry: Option<base::IspEntry>,
+    base_version: u32,
+    /// Определение провайдера уже закончилось (удачно или нет).
+    done: bool,
+}
+
+static BASE_DONE: AtomicBool = AtomicBool::new(false);
+
+#[tauri::command]
+fn isp_info() -> IspInfo {
+    IspInfo {
+        isp: base::isp(),
+        entry: base::isp_entry(),
+        base_version: base::base().map_or(0, |b| b.version),
+        done: BASE_DONE.load(Ordering::SeqCst),
+    }
+}
+
+/// Открыть страницу на GitHub проекта (например, чтобы поделиться результатом подбора).
+#[tauri::command]
+fn open_github(path: String) -> Result<(), String> {
+    if path.contains(['"', ' ', '\\']) {
+        return Err("bad path".into());
+    }
+    let url = format!("https://github.com/studiomurda09-dotcom/proryv/{path}");
+    hidden_cmd("explorer").arg(url).status().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// При запуске: база из кэша сразу, потом свежая с GitHub и провайдер.
+fn spawn_base_loader(app: AppHandle, cache: PathBuf) {
+    if let Some(b) = std::fs::read_to_string(&cache).ok().and_then(|s| serde_json::from_str(&s).ok()) {
+        base::set_base(b);
+    }
+    std::thread::spawn(move || {
+        let state = app.state::<AppState>();
+        let update = state.settings.lock().unwrap().update_base;
+        let before = (base::presets(), base::strategies());
+        if update {
+            let cached = base::base().map_or(0, |b| b.version);
+            if let Some(fresh) = base::fetch().filter(|b| b.version >= cached) {
+                if let Ok(text) = serde_json::to_string_pretty(&fresh) {
+                    let _ = std::fs::write(&cache, text);
+                }
+                base::set_base(fresh);
+            }
+        }
+        base::set_isp(base::detect_isp());
+        BASE_DONE.store(true, Ordering::SeqCst);
+        let _ = app.emit("base-updated", isp_info());
+        // Пресеты поменялись (домены, стратегия провайдера) — применяем без перезапуска программы.
+        if (base::presets(), base::strategies()) != before && is_running(&state) && !state.autotune_running.load(Ordering::SeqCst) {
+            let _ = app.emit("status", start_engine(&state));
+        }
+    });
+}
+
 // ---------------------------------------------------------------- обновления
 
 #[derive(Serialize)]
@@ -533,9 +683,11 @@ fn show_main(app: &AppHandle) {
 }
 
 fn build_tray(app: &tauri::App) -> tauri::Result<()> {
-    let show = MenuItem::with_id(app, "show", "Открыть Proryv", true, None::<&str>)?;
-    let toggle = MenuItem::with_id(app, "toggle", "Включить / выключить обход", true, None::<&str>)?;
-    let quit = MenuItem::with_id(app, "quit", "Выход", true, None::<&str>)?;
+    let en = is_en(&app.state::<AppState>());
+    let tr = |ru: &'static str, en_s: &'static str| if en { en_s } else { ru };
+    let show = MenuItem::with_id(app, "show", tr("Открыть Proryv", "Open Proryv"), true, None::<&str>)?;
+    let toggle = MenuItem::with_id(app, "toggle", tr("Включить / выключить обход", "Turn bypass on / off"), true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", tr("Выход", "Quit"), true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&show, &toggle, &quit])?;
     TrayIconBuilder::with_id("main")
         .icon(app.default_window_icon().cloned().expect("icon"))
@@ -546,7 +698,7 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
             "show" => show_main(app),
             "toggle" => {
                 let state = app.state::<AppState>();
-                let st = if is_running(&state) { stop_engine(&state) } else { start_engine(&state) };
+                let st = if is_running(&state) { stop_engine(&state) } else { start_engine_notify(app) };
                 let _ = app.emit("status", st);
             }
             "quit" => {
@@ -569,6 +721,7 @@ pub fn run() {
     let autostarted = std::env::args().any(|a| a == "--autostart");
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_notification::init())
         .setup(move |app| {
             let settings_path = app.path().app_config_dir()?.join("settings.json");
             let settings = Settings::load(&settings_path);
@@ -588,9 +741,10 @@ pub fn run() {
                 tg_error: Mutex::new(None),
             });
             sync_tg(&app.state::<AppState>());
+            spawn_base_loader(app.handle().clone(), app.path().app_config_dir()?.join("base.json"));
             build_tray(app)?;
             if enable_now {
-                start_engine(&app.state::<AppState>());
+                start_engine_notify(app.handle());
             }
             spawn_healer(app.handle().clone());
             Ok(())
@@ -624,7 +778,9 @@ pub fn run() {
             tg_open,
             tg_test,
             check_update,
-            install_update
+            install_update,
+            isp_info,
+            open_github
         ])
         .run(tauri::generate_context!())
         .expect("не удалось запустить Proryv");

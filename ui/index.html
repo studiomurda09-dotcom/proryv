@@ -132,9 +132,9 @@
           <div class="card stat"><small>Фейков отправлено</small><b id="st-fakes">0</b></div>
         </div>
         <h2>Провайдер</h2>
-        <div class="card row">
-          <div><b id="isp-name">Определится автоматически</b><small>Под вашего провайдера подбираются стратегии из общей базы. Появится на этапе 3.</small></div>
-          <span class="tag">скоро</span>
+        <div class="card row" data-keywords="провайдер isp asn">
+          <div><b id="isp-name">Определяем провайдера…</b><small id="isp-sub">Для «Авто» берутся стратегии, которые сработали у других пользователей этого провайдера.</small></div>
+          <span class="tag" id="isp-tag"></span>
         </div>
       </section>
 
@@ -238,13 +238,11 @@
       <section class="page" data-page="appearance">
         <h1>Внешний вид</h1>
         <div class="cards">
-          <div class="card row"><div><b>Тема</b><small>Светлая тема появится позже.</small></div>
-            <select data-setting="theme"><option value="dark">Тёмная</option><option value="system">Как в системе</option></select></div>
           <div class="card row"><div><b>Фон окна</b><small>Требуется перезапуск. Mica работает только в Windows 11.</small></div>
             <select data-setting="backdrop"><option value="mica">Mica</option><option value="acrylic">Acrylic</option><option value="none">Нет</option></select></div>
           <div class="card row"><div><b>Акцентный цвет</b><small>Цвет переключателей, кнопок и индикаторов.</small></div><div class="swatches" data-accent-picker></div></div>
           <div class="card row"><div><b>Анимации</b><small>Отключите для слабых ПК.</small></div><label class="toggle"><input type="checkbox" data-setting="animations"><i></i></label></div>
-          <div class="card row"><div><b>Язык</b><small>Нужен перезапуск.</small></div>
+          <div class="card row"><div><b>Язык</b><small>Язык интерфейса и уведомлений.</small></div>
             <select data-setting="language"><option value="system">Как в системе</option><option value="ru">Русский</option><option value="en">English</option></select></div>
         </div>
       </section>
@@ -266,19 +264,12 @@
         <h1>Сеть</h1>
         <div class="cards">
           <div class="card row" data-keywords="ютуб квик udp"><div><b>Блокировать QUIC к YouTube</b><small>Только UDP 443 к серверам Google/YouTube — браузер пойдёт по TCP, где работает обход. VPN и игры, которым нужен UDP 443, не затрагиваются.</small></div><label class="toggle"><input type="checkbox" data-setting="block_quic"><i></i></label></div>
-          <div class="card row" data-keywords="днс dns doh"><div><b>Защищённый DNS (DoH)</b><small>Защищает от подмены DNS провайдером.</small></div><label class="toggle"><input type="checkbox" data-setting="doh"><i></i></label></div>
-          <div class="card row"><div><b>Сервер DoH</b></div>
-            <select data-setting="doh_server">
-              <option value="https://cloudflare-dns.com/dns-query">Cloudflare</option>
-              <option value="https://dns.google/dns-query">Google</option>
-              <option value="https://dns.quad9.net/dns-query">Quad9</option>
-              <option value="https://dns.adguard-dns.com/dns-query">AdGuard</option>
-            </select></div>
         </div>
         <h1>Прочее</h1>
         <div class="cards">
+          <div class="card row" data-keywords="база домены стратегии провайдер github"><div><b>Обновлять базу стратегий</b><small>Списки доменов, стратегии и база провайдеров скачиваются с GitHub при запуске — без новой версии программы.</small></div><label class="toggle"><input type="checkbox" data-setting="update_base"><i></i></label></div>
           <div class="card row"><div><b>Проверять обновления</b><small>При запуске смотреть, нет ли новой версии на GitHub, и предлагать обновиться в один клик.</small></div><label class="toggle"><input type="checkbox" data-setting="check_updates"><i></i></label></div>
-          <div class="card row"><div><b>Уведомления</b><small>Когда стратегия сменилась или что-то сломалось.</small></div><label class="toggle"><input type="checkbox" data-setting="notifications"><i></i></label></div>
+          <div class="card row"><div><b>Уведомления</b><small>Уведомление Windows, когда самолечение сменило стратегию или обход не смог включиться.</small></div><label class="toggle"><input type="checkbox" data-setting="notifications"><i></i></label></div>
           <div class="card row"><div><b>Показать мастер настройки снова</b></div><button class="btn" id="act-wizard">Открыть</button></div>
         </div>
       </section>
@@ -325,6 +316,7 @@
   <div class="toast hidden" id="toast"></div>
   <script src="mock-data.js"></script>
   <script src="icons.js"></script>
+  <script src="i18n.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

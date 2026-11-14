@@ -1,0 +1,198 @@
+//! Обновляемая база: добавки к пресетам и стратегии по провайдерам.
+//!
+//! Файл `data/base.json` лежит в репозитории на GitHub. Программа скачивает его
+//! при запуске, поэтому списки доменов и стратегии обновляются без новой версии.
+//! Встроенные пресеты остаются основой, база только дополняет их.
+
+use std::{collections::HashMap, process::Command, sync::RwLock};
+
+use serde::{Deserialize, Serialize};
+
+use crate::{
+    presets::{self, Preset},
+    strategy::Strategy,
+};
+
+pub const BASE_URL: &str = "https://raw.githubusercontent.com/studiomurda09-dotcom/proryv/main/data/base.json";
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(default)]
+pub struct Base {
+    pub version: u32,
+    /// Дополнительные домены: id пресета → домены.
+    pub domains: HashMap<String, Vec<String>>,
+    /// Новые стратегии или замена встроенных с тем же id.
+    pub strategies: Vec<Strategy>,
+    /// Провайдеры: какая стратегия у них работает.
+    pub isp: Vec<IspEntry>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct IspEntry {
+    /// Номер автономной системы провайдера (AS12389 → 12389).
+    pub asn: u32,
+    pub name: String,
+    /// id пресета → id стратегии.
+    pub strategies: HashMap<String, String>,
+}
+
+/// Провайдер пользователя, как его определил ip-api.com.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct Isp {
+    pub asn: u32,
+    pub name: String,
+}
+
+static BASE: RwLock<Option<Base>> = RwLock::new(None);
+static ISP: RwLock<Option<Isp>> = RwLock::new(None);
+
+pub fn set_base(b: Base) {
+    *BASE.write().unwrap() = Some(b);
+}
+pub fn base() -> Option<Base> {
+    BASE.read().unwrap().clone()
+}
+pub fn set_isp(isp: Option<Isp>) {
+    *ISP.write().unwrap() = isp;
+}
+pub fn isp() -> Option<Isp> {
+    ISP.read().unwrap().clone()
+}
+
+/// Запись базы для текущего провайдера, если она есть.
+pub fn isp_entry() -> Option<IspEntry> {
+    find_isp(base().as_ref()?, isp()?.asn)
+}
+fn find_isp(b: &Base, asn: u32) -> Option<IspEntry> {
+    b.isp.iter().find(|e| e.asn == asn).cloned()
+}
+
+/// Встроенные стратегии с заменами и добавками из базы.
+pub fn strategies() -> Vec<Strategy> {
+    strategies_with(base().as_ref())
+}
+fn strategies_with(b: Option<&Base>) -> Vec<Strategy> {
+    let mut all = presets::builtin_strategies();
+    if let Some(b) = b {
+        for s in b.strategies.iter().cloned() {
+            match all.iter_mut().find(|x| x.id == s.id) {
+                Some(x) => *x = s,
+                None => all.push(s),
+            }
+        }
+    }
+    all
+}
+
+/// Встроенные пресеты с доменами из базы. Стратегия, которая сработала у этого
+/// провайдера, ставится первой — её берёт «Авто» и с неё начинает автоподбор.
+pub fn presets() -> Vec<Preset> {
+    let b = base();
+    let entry = b.as_ref().zip(isp()).and_then(|(b, i)| find_isp(b, i.asn));
+    presets_with(b.as_ref(), entry.as_ref())
+}
+fn presets_with(b: Option<&Base>, entry: Option<&IspEntry>) -> Vec<Preset> {
+    let mut all = presets::builtin_presets();
+    let known: Vec<String> = strategies_with(b).into_iter().map(|s| s.id).collect();
+    for p in &mut all {
+        if let Some(extra) = b.and_then(|b| b.domains.get(&p.id)) {
+            for d in extra {
+                if !p.domains.contains(d) {
+                    p.domains.push(d.clone());
+                }
+            }
+        }
+        if let Some(sid) = entry.and_then(|e| e.strategies.get(&p.id)) {
+            if known.contains(sid) {
+                p.strategies.retain(|x| x != sid);
+                p.strategies.insert(0, sid.clone());
+            }
+        }
+    }
+    all
+}
+
+fn curl(args: &[&str]) -> Option<String> {
+    let mut cmd = Command::new("curl.exe");
+    cmd.args(["-s", "-f", "-L", "--connect-timeout", "6", "-m", "15"]).args(args);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    let out = cmd.output().ok()?;
+    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// Скачать свежую базу с GitHub.
+pub fn fetch() -> Option<Base> {
+    serde_json::from_str(&curl(&[BASE_URL])?).ok()
+}
+
+/// Определить провайдера. Запрос идёт через физический адаптер, мимо VPN,
+/// иначе вместо провайдера определится VPN-сервер. Без прямого адаптера не гадаем.
+pub fn detect_isp() -> Option<Isp> {
+    #[cfg(windows)]
+    let iface = crate::platform::windivert::direct_source_ip();
+    #[cfg(not(windows))]
+    let iface: Option<String> = None;
+    let url = "http://ip-api.com/json/?fields=status,isp,as";
+    let body = match &iface {
+        Some(ip) => curl(&["--interface", ip, url])?,
+        None => curl(&[url])?,
+    };
+    #[derive(Deserialize)]
+    struct Resp {
+        status: String,
+        isp: String,
+        #[serde(rename = "as")]
+        asn: String,
+    }
+    let r: Resp = serde_json::from_str(&body).ok()?;
+    if r.status != "success" {
+        return None;
+    }
+    parse_as(&r.asn).map(|asn| Isp { asn, name: r.isp })
+}
+
+/// "AS12389 PJSC Rostelecom" → 12389.
+fn parse_as(s: &str) -> Option<u32> {
+    s.strip_prefix("AS")?.split_whitespace().next()?.parse().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn as_number() {
+        assert_eq!(parse_as("AS12389 PJSC Rostelecom"), Some(12389));
+        assert_eq!(parse_as(""), None);
+    }
+
+    #[test]
+    fn repo_base_parses_and_points_to_real_strategies() {
+        let b: Base = serde_json::from_str(include_str!("../../../data/base.json")).expect("data/base.json");
+        let ids: Vec<String> = presets::builtin_strategies().into_iter().map(|s| s.id).chain(b.strategies.iter().map(|s| s.id.clone())).collect();
+        let pids: Vec<String> = presets::builtin_presets().into_iter().map(|p| p.id).collect();
+        for e in &b.isp {
+            for (p, s) in &e.strategies {
+                assert!(pids.contains(p), "AS{}: нет пресета {p}", e.asn);
+                assert!(ids.contains(s), "AS{}: нет стратегии {s}", e.asn);
+            }
+        }
+        for p in b.domains.keys() {
+            assert!(pids.contains(p), "domains: нет пресета {p}");
+        }
+    }
+
+    #[test]
+    fn isp_strategy_goes_first() {
+        let mut strategies = HashMap::new();
+        strategies.insert("youtube".to_string(), "fake_ts".to_string());
+        let b = Base { version: 1, isp: vec![IspEntry { asn: 65000, name: "Test".into(), strategies }], ..Default::default() };
+        let entry = find_isp(&b, 65000);
+        let yt = presets_with(Some(&b), entry.as_ref()).into_iter().find(|p| p.id == "youtube").unwrap();
+        assert_eq!(yt.strategies[0], "fake_ts");
+    }
+}

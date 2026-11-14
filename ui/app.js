@@ -10,7 +10,12 @@ const mockBackend = (() => {
   const M = window.MOCK_DATA;
   const KEY = 'proryv-mock-settings';
   let enabled = false, started = 0;
-  const load = () => { try { return JSON.parse(localStorage.getItem(KEY)) || null; } catch { return null; } };
+  // ?shot=1&lang=en — чистые настройки для скриншотов и видео, без мастера.
+  const shot = new URLSearchParams(location.search);
+  const load = () => {
+    if (shot.has('shot')) return { first_run_done: true, language: shot.get('lang') || 'ru' };
+    try { return JSON.parse(localStorage.getItem(KEY)) || null; } catch { return null; }
+  };
   const store = (s) => { try { localStorage.setItem(KEY, JSON.stringify(s)); } catch {} };
 
   // Упрощённый порт strategy::plan — только для предпросмотра в браузере.
@@ -59,7 +64,13 @@ const mockBackend = (() => {
 
   const status = () => ({
     state: enabled ? 'running' : 'stopped', presets: [], message: null, demo: true,
-    stats: { connections: 0, desynced: 0, fakes_sent: 0, uptime_secs: enabled ? Math.floor((Date.now() - started) / 1000) : 0 },
+    stats: (() => {
+      // В режиме съёмки счётчики растут, как в настоящей работе.
+      const sec = enabled ? (Date.now() - started) / 1000 : 0, live = shot.has('shot');
+      return { connections: live ? Math.floor(sec * 2.6) : 0, desynced: live ? Math.floor(sec * 2.1) : 0,
+        fakes_sent: live ? Math.floor(sec * 17) : 0, uptime_secs: Math.floor(sec),
+        last_host: live && sec > 1 ? ['rr3---sn-4g5edn6r.googlevideo.com', 'discord.com', 'i.ytimg.com'][Math.floor(sec / 3) % 3] : undefined };
+    })(),
   });
 
   return {
@@ -76,6 +87,8 @@ const mockBackend = (() => {
       stats: { active: 3, total: 12, via_ws: 12, via_tcp: 0, failed: 0, bytes_up: 1200000, bytes_down: 48000000 } }),
     tg_open: () => null,
     check_update: () => null,
+    isp_info: () => ({ isp: { asn: 64512, name: 'Example Telecom' }, entry: { asn: 64512, name: 'Example Telecom', strategies: { youtube: 'alt11' } }, base_version: 1, done: true }),
+    open_github: () => null,
     install_update: () => { throw 'в браузере обновление недоступно'; },
     tg_test: () => [[2, { Ok: 340 }], [4, { Ok: 370 }], [1, { Err: 'заблокирован по IP' }]],
     diagnose: ({ host }) => ({ host, ips: ['142.251.150.4'], verdict: 'dpi', direct_path: true,
@@ -157,6 +170,7 @@ function setSetting(key, value) {
   syncControls();
   markDirty();
   if (key === 'enabled_presets' || key === 'strategy_override') { renderPresets(); renderHero(); }
+  if (key === 'language') applyLang(value);
 }
 function bindSettings() {
   document.addEventListener('change', (e) => {
@@ -401,7 +415,9 @@ async function onAutotuneDone(res) {
   const o = res.Ok;
   if (o.best) {
     $$(`#at-results [data-sid="${o.best}"]`).forEach((r) => r.classList.add('best'));
-    box.innerHTML = `<span class="verdict ok">Готово</span><div>Лучшая стратегия: <b>${esc(o.best_name)}</b>. Она сохранена для пресета и уже применяется.</div>`;
+    box.innerHTML = `<span class="verdict ok">Готово</span><div class="grow">Лучшая стратегия: <b>${esc(o.best_name)}</b>. Она сохранена для пресета и уже применяется.</div>
+      <button class="btn" id="at-share">Поделиться результатом</button>`;
+    $('#at-share').onclick = () => shareResult(o);
   } else if (o.baseline_ok === o.of) {
     box.innerHTML = `<span class="verdict ok">Без блокировки</span><div>Сайты открываются и без обхода — менять ничего не нужно.</div>`;
   } else {
@@ -410,6 +426,45 @@ async function onAutotuneDone(res) {
   if (o.direct_ip === null && TAURI) box.insertAdjacentHTML('beforeend', '<small>Не нашёлся прямой адаптер — проверка могла идти через VPN.</small>');
   // Подбор сохранил стратегию в настройках — подтягиваем их.
   await refreshOverrides();
+}
+
+/* ---------- Провайдер и база ---------- */
+let ispInfo = null;
+function renderIsp(info) {
+  ispInfo = info;
+  const name = $('#isp-name'), sub = $('#isp-sub'), tag = $('#isp-tag');
+  if (!info.isp) {
+    if (!info.done) return;
+    name.textContent = 'Не удалось определить провайдера';
+    sub.textContent = 'Проверка шла через VPN или без интернета. Стратегии подбираются как обычно.';
+    tag.textContent = '';
+    return;
+  }
+  name.textContent = `${info.isp.name} · AS${info.isp.asn}`;
+  tag.textContent = info.entry ? 'есть в базе' : 'нет в базе';
+  sub.textContent = info.entry
+    ? 'Для «Авто» берутся стратегии, которые сработали у других пользователей этого провайдера.'
+    : 'Для этого провайдера в базе пока нет стратегий. Запустите автоподбор и поделитесь результатом.';
+}
+async function onBaseUpdated(info) {
+  renderIsp(info);
+  const boot = await call('get_bootstrap');
+  state.presets = boot.presets; state.strategies = boot.strategies;
+  const pv = $('#pv-strategy').value;
+  renderPresets(); renderStrategies(); renderAutotunePresets(); renderHero();
+  $('#pv-strategy').value = pv || 'seqovl_google';
+}
+/** Результат подбора — в GitHub Issues, оттуда он попадает в общую базу. */
+function shareResult(o) {
+  const isp = ispInfo && ispInfo.isp;
+  const title = `Стратегия: ${isp ? isp.name + ' AS' + isp.asn : 'провайдер не определён'} — ${o.preset} → ${o.best}`;
+  const body = [
+    `Провайдер: ${isp ? isp.name : '—'}`, `AS: ${isp ? isp.asn : '—'}`, `Пресет: ${o.preset}`, `Лучшая стратегия: ${o.best} (${o.best_name})`,
+    `Без обхода открылось: ${o.baseline_ok}/${o.of}`, `Версия Proryv: ${$('#about-ver').textContent}`, '',
+    'Все результаты:', ...(o.results || []).map((r) => `- ${r.strategy}: ${r.ok}/${r.of}, ${(r.ms / 1000).toFixed(1)} с`),
+  ].join('\n');
+  call('open_github', { path: `issues/new?labels=strategy&title=${encodeURIComponent(title)}&body=${encodeURIComponent(body)}` })
+    .catch((e) => toast(String(e)));
 }
 
 /* ---------- Диагностика ---------- */
@@ -701,6 +756,7 @@ async function init() {
   Object.assign(state, { presets: boot.presets, strategies: boot.strategies, settings: boot.settings });
   state.saved = structuredClone(boot.settings);
   $('#about-ver').textContent = 'v' + boot.version;
+  applyLang(boot.settings.language);
 
   bindSettings(); bindPresets(); bindWizard(); bindWindow(); bindSearch();
   renderPresets(); renderStrategies(); syncControls(); markDirty();
@@ -725,6 +781,8 @@ async function init() {
   onEvent('autotune-done', onTuneDone);
   onEvent('heal-start', (preset) => toast(`Самолечение: ${presetName(preset)} перестал открываться — подбираем стратегию…`));
   onEvent('status', (st) => { state.status = st; renderHero(); });
+  onEvent('base-updated', onBaseUpdated);
+  call('isp_info').then(renderIsp).catch(() => {});
   renderAutotunePresets(); renderTunnels(); renderTg();
   setInterval(() => { if ($('.page.active')?.dataset.page === 'presets') renderTg(); }, 3000);
   $('#tg-open').onclick = async () => {
@@ -756,6 +814,7 @@ async function init() {
 
   let page = 'home';
   try { page = localStorage.getItem('proryv-page') || 'home'; } catch {}
+  if (PAGE_TITLES[location.hash.slice(1)]) page = location.hash.slice(1);
   showPage(PAGE_TITLES[page] ? page : 'home');
   showWizard(!state.settings.first_run_done);
 }

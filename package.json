@@ -2,7 +2,7 @@
   "name": "proryv",
   "private": true,
   "license": "GPL-3.0-or-later",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "scripts": {
     "ui": "node tools/serve.mjs",
     "tauri": "tauri",
@@ -12,6 +12,9 @@
     "mock": "cargo run -q -p proryv-core --example dump_builtin > ui/mock-data.js"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "2.9.6"
+    "@tauri-apps/cli": "2.9.6",
+    "mp4-muxer": "^5.1.3",
+    "mp4box": "^0.5.2",
+    "playwright-core": "^1.49.1"
   }
 }
