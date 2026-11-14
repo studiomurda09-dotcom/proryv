@@ -40,7 +40,7 @@
     "category": "Utility",
     "shortDescription": "Обход DPI с автоподбором стратегий",
     "longDescription": "Proryv обходит DPI-блокировки (YouTube, Discord и др.) и сам подбирает стратегию под вашего провайдера.",
-    "copyright": "MIT License",
+    "copyright": "© 2026 studiomurda09-dotcom. GPL-3.0",
     "resources": {
       "../third_party/windivert/WinDivert.dll": "WinDivert.dll",
       "../third_party/windivert/WinDivert64.sys": "WinDivert64.sys"
