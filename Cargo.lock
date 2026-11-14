@@ -2712,7 +2712,7 @@ dependencies = [
 
 [[package]]
 name = "proryv"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "proryv-core",
  "proryv-tg",
@@ -2725,7 +2725,7 @@ dependencies = [
 
 [[package]]
 name = "proryv-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -2739,7 +2739,7 @@ dependencies = [
 
 [[package]]
 name = "proryv-tg"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "aes",
  "base64 0.22.1",

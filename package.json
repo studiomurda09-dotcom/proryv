@@ -1,9 +1,10 @@
 {
   "name": "proryv",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.1",
   "scripts": {
     "ui": "node tools/serve.mjs",
+    "tauri": "tauri",
     "dev": "tauri dev",
     "build": "tauri build",
     "icons": "tauri icon app-icon.svg",

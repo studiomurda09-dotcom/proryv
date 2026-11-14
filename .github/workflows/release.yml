@@ -1,5 +1,5 @@
-# Сборка установщиков для всех платформ при пуше тега вида v0.1.0.
-# Результат — черновик релиза на GitHub с файлами .msi, .exe, .deb, .rpm, .AppImage, .dmg.
+# Сборка установщиков Windows при пуше тега вида v0.1.0.
+# Результат — черновик релиза на GitHub с .msi, -setup.exe и latest.json для автообновления.
 name: release
 
 on:
@@ -12,35 +12,15 @@ permissions:
 
 jobs:
   build:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: windows-latest
-            args: ""
-          - platform: ubuntu-22.04
-            args: ""
-          - platform: macos-latest
-            args: "--target aarch64-apple-darwin"
-          - platform: macos-latest
-            args: "--target x86_64-apple-darwin"
-    runs-on: ${{ matrix.platform }}
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Зависимости Linux
-        if: matrix.platform == 'ubuntu-22.04'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf rpm
 
       - uses: actions/setup-node@v4
         with:
           node-version: 22
 
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ startsWith(matrix.platform, 'macos') && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
 
       - uses: swatinem/rust-cache@v2
 
@@ -61,5 +41,4 @@ jobs:
           releaseBody: "Скачайте установщик для своей системы ниже. Для Windows — файл .msi или -setup.exe."
           releaseDraft: true
           prerelease: false
-          args: ${{ matrix.args }}
           updaterJsonPreferNsis: true
