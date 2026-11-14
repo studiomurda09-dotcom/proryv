@@ -1,0 +1,15 @@
+{
+  "name": "proryv",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "ui": "node tools/serve.mjs",
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "icons": "tauri icon app-icon.svg",
+    "mock": "cargo run -q -p proryv-core --example dump_builtin > ui/mock-data.js"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.9.6"
+  }
+}

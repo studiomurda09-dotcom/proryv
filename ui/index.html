@@ -1,0 +1,330 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Proryv</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <!-- Заголовок окна -->
+  <header class="titlebar" data-tauri-drag-region>
+    <div class="tb-left" data-tauri-drag-region>
+      <button class="icon-btn" id="btn-sidebar" title="Свернуть меню" data-icon="panel"></button>
+      <button class="icon-btn" id="btn-search" title="Поиск по настройкам (Ctrl+F)" data-icon="search"></button>
+      <div class="search hidden" id="search">
+        <input id="search-input" placeholder="Поиск по настройкам" spellcheck="false" autocomplete="off" />
+        <div class="search-results hidden" id="search-results"></div>
+      </div>
+      <span class="tb-page" id="tb-page" data-tauri-drag-region></span>
+    </div>
+    <div class="tb-right">
+      <span class="pill" id="tb-status"><i class="dot"></i><span>Выключен</span></span>
+      <button class="win-btn" id="win-min" data-icon="minus"></button>
+      <button class="win-btn" id="win-max" data-icon="square"></button>
+      <button class="win-btn close" id="win-close" data-icon="x"></button>
+    </div>
+  </header>
+
+  <!-- ===================== Мастер первого запуска ===================== -->
+  <section id="wizard" class="wizard hidden">
+    <div class="wz-body">
+      <div class="wz-step" data-step="0">
+        <div class="wz-icon" data-icon="languages"></div>
+        <h1>Выберите язык</h1>
+        <div class="wz-list" id="wz-lang">
+          <button data-val="system">Как в системе</button>
+          <button data-val="ru">Русский</button>
+          <button data-val="en">English</button>
+        </div>
+      </div>
+
+      <div class="wz-step" data-step="1">
+        <div class="wz-icon" data-icon="palette"></div>
+        <h1>Внешний вид</h1>
+        <p class="wz-sub">Тему и фон окна можно поменять в любой момент в настройках.</p>
+        <div class="cards">
+          <div class="card row">
+            <div><b>Фон окна</b><small>Mica и Acrylic работают только в Windows 11.</small></div>
+            <select data-setting="backdrop">
+              <option value="mica">Mica</option><option value="acrylic">Acrylic</option><option value="none">Нет</option>
+            </select>
+          </div>
+          <div class="card row">
+            <div><b>Акцентный цвет</b><small>Цвет переключателей и кнопок.</small></div>
+            <div class="swatches" data-accent-picker></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="wz-step" data-step="2">
+        <div class="wz-icon" data-icon="layers"></div>
+        <h1>Что разблокировать?</h1>
+        <p class="wz-sub">Выберите сервисы. Стратегию обхода программа подберёт сама.</p>
+        <div class="preset-grid" id="wz-presets"></div>
+      </div>
+
+      <div class="wz-step" data-step="3">
+        <div class="wz-icon" data-icon="rocket"></div>
+        <h1>Запуск</h1>
+        <div class="cards">
+          <div class="card row"><div><b>Запускать вместе с Windows</b><small>Обход будет работать сразу после включения ПК.</small></div><label class="toggle"><input type="checkbox" data-setting="autostart"><i></i></label></div>
+          <div class="card row"><div><b>Включать обход при запуске</b><small>Не нужно нажимать кнопку каждый раз.</small></div><label class="toggle"><input type="checkbox" data-setting="enable_on_launch"><i></i></label></div>
+          <div class="card row"><div><b>Сворачивать в трей</b><small>Кнопка закрытия прячет окно, обход продолжает работать.</small></div><label class="toggle"><input type="checkbox" data-setting="minimize_to_tray"><i></i></label></div>
+        </div>
+      </div>
+
+      <div class="wz-step" data-step="4">
+        <div class="wz-icon" data-icon="shield"></div>
+        <h1>Проверка системы</h1>
+        <p class="wz-sub">Ищем программы, которые будут мешать работе.</p>
+        <div class="cards" id="wz-conflicts"></div>
+      </div>
+    </div>
+    <footer class="bottombar">
+      <button class="btn" id="wz-back">Назад</button>
+      <div class="progress"><i id="wz-progress"></i></div>
+      <button class="btn accent" id="wz-next">Далее</button>
+    </footer>
+  </section>
+
+  <!-- ===================== Главное окно ===================== -->
+  <div id="app" class="app hidden">
+    <nav class="sidebar" id="sidebar">
+      <a data-page="home" data-icon="home">Главная</a>
+      <a data-page="presets" data-icon="layers">Пресеты</a>
+      <a data-page="strategies" data-icon="zap">Стратегии</a>
+      <a data-page="autotune" data-icon="wand">Автоподбор</a>
+      <a data-page="domains" data-icon="list">Списки доменов</a>
+      <a data-page="diag" data-icon="activity">Диагностика</a>
+      <hr />
+      <a data-page="appearance" data-icon="palette">Внешний вид</a>
+      <a data-page="general" data-icon="settings">Общие настройки</a>
+      <div class="grow"></div>
+      <a data-page="about" data-icon="info">О программе</a>
+    </nav>
+
+    <main class="content" id="content">
+      <!-- Главная -->
+      <section class="page" data-page="home">
+        <div class="demo-banner hidden" id="demo-banner"><span data-icon="alert"></span>
+          Просмотр в браузере: перехват пакетов работает только в приложении.</div>
+        <div class="demo-banner hidden" id="admin-banner"><span data-icon="shield"></span>
+          <span class="grow">Для перехвата трафика нужны права администратора.</span>
+          <button class="btn accent" id="btn-admin">Перезапустить от администратора</button></div>
+        <div class="demo-banner hidden" id="upd-banner"><span data-icon="download"></span>
+          <span class="grow" id="upd-banner-text"></span>
+          <button class="btn accent" id="upd-install">Обновить</button></div>
+        <div class="demo-banner err hidden" id="driver-banner"><span data-icon="alert"></span>
+          Не найдены файлы WinDivert (WinDivert.dll и WinDivert64.sys) рядом с программой.</div>
+        <div class="hero card">
+          <button class="power" id="power" data-icon="power"></button>
+          <div class="hero-text">
+            <h1 id="hero-title">Обход выключен</h1>
+            <p id="hero-sub">Нажмите кнопку, чтобы включить.</p>
+            <div class="chips" id="hero-chips"></div>
+          </div>
+        </div>
+        <div class="stats">
+          <div class="card stat"><small>Время работы</small><b id="st-uptime">—</b></div>
+          <div class="card stat"><small>Соединений</small><b id="st-conn">0</b></div>
+          <div class="card stat"><small>Обработано</small><b id="st-desync">0</b></div>
+          <div class="card stat"><small>Фейков отправлено</small><b id="st-fakes">0</b></div>
+        </div>
+        <h2>Провайдер</h2>
+        <div class="card row">
+          <div><b id="isp-name">Определится автоматически</b><small>Под вашего провайдера подбираются стратегии из общей базы. Появится на этапе 3.</small></div>
+          <span class="tag">скоро</span>
+        </div>
+      </section>
+
+      <!-- Пресеты -->
+      <section class="page" data-page="presets">
+        <h1>Пресеты</h1>
+        <p class="sub">Включите сервисы, которые нужно разблокировать. «Авто» — программа сама подбирает и меняет стратегию, если она перестала работать.</p>
+        <div class="cards" id="preset-list"></div>
+        <h2>Дополнительно</h2>
+        <div class="cards">
+          <div class="card tg-card" data-keywords="телеграм телеграмм тг прокси">
+            <div class="row">
+              <div class="p-icon" data-icon="send"></div>
+              <div class="grow"><b>Telegram</b><small>Локальный прокси: Telegram Desktop ходит через WebSocket веб-версии Telegram, как в TgWsProxy. Работает без VPN для аккаунтов на DC2/DC4 (большинство в России).</small></div>
+              <label class="toggle"><input type="checkbox" data-setting="telegram"><i></i></label>
+            </div>
+            <div class="tg-body" id="tg-body">
+              <div class="mono" id="tg-status">—</div>
+              <div class="row gap">
+                <button class="btn accent" id="tg-open">Подключить Telegram</button>
+                <button class="btn" id="tg-copy">Скопировать ссылку</button>
+                <button class="btn" id="tg-test">Проверить</button>
+              </div>
+              <div class="mono" id="tg-test-out"></div>
+            </div>
+          </div>
+          <div class="card row" data-keywords="игры игровой фильтр роблокс roblox гейм"><div><b>Game Filter</b><small>Обход для игр: фейки перед первыми пакетами соединения к игровым серверам (порты 1024–65535). Как одноимённый режим в zapret.</small></div>
+            <select data-setting="game_filter">
+              <option value="off">Выключен</option>
+              <option value="udp">Только UDP</option>
+              <option value="tcp">Только TCP</option>
+              <option value="all">TCP и UDP</option>
+            </select></div>
+          <div class="card">
+            <b>Игровые серверы (диапазоны IP)</b>
+            <small>По одному на строку, формат <span class="mono">128.116.0.0/17</span>. По умолчанию — серверы Roblox. Game Filter действует только на эти адреса, чтобы не трогать остальной трафик.</small>
+            <textarea data-setting-list="game_ips" rows="4" style="margin-top:10px" placeholder="128.116.0.0/17"></textarea>
+          </div>
+        </div>
+      </section>
+
+      <!-- Стратегии -->
+      <section class="page" data-page="strategies">
+        <h1>Стратегии</h1>
+        <p class="sub">Методы обхода. Посмотрите, как стратегия режет пакет: введите сайт и выберите стратегию.</p>
+        <div class="card preview">
+          <div class="row gap">
+            <input id="pv-host" value="www.youtube.com" spellcheck="false" />
+            <select id="pv-strategy"></select>
+          </div>
+          <div class="pv-out" id="pv-out"></div>
+        </div>
+        <div class="cards" id="strategy-list"></div>
+      </section>
+
+      <!-- Автоподбор -->
+      <section class="page" data-page="autotune">
+        <h1>Автоподбор</h1>
+        <p class="sub">Главная фишка: программа сама находит дыру в DPI вашего провайдера и чинит обход, когда провайдер что-то меняет.</p>
+        <div class="card row big">
+          <div><b>Подобрать стратегию</b><small>Перебирает методы и проверяет сайты напрямую, мимо VPN. Лучшая стратегия сохранится сама. 1–3 минуты.</small></div>
+          <select id="at-preset"></select>
+          <button class="btn accent" id="at-start">Подобрать</button>
+        </div>
+        <div class="cards hidden" id="at-results"></div>
+        <div class="card at-summary hidden" id="at-summary"></div>
+        <div class="cards">
+          <div class="card row"><div><b>Самолечение</b><small>Proryv следит за соединениями: если по пресету много повторных попыток (сайт перестал открываться), он сам переподберёт стратегию — не чаще раза в 15 минут.</small></div><label class="toggle"><input type="checkbox" data-setting="auto_heal"><i></i></label></div>
+          <div class="card row"><div><b>Случайные фейки</b><small>Каждый фейк со случайным именем сайта и разрезом — DPI не сможет поймать их по шаблону.</small></div><label class="toggle"><input type="checkbox" data-setting="random_fakes"><i></i></label></div>
+        </div>
+      </section>
+
+      <!-- Домены -->
+      <section class="page" data-page="domains">
+        <h1>Списки доменов</h1>
+        <p class="sub">По одному домену на строку. Поддомены включаются автоматически.</p>
+        <h2>Свои домены</h2>
+        <textarea data-setting-list="custom_domains" rows="8" placeholder="example.com&#10;rutracker.org"></textarea>
+        <h2>Исключения</h2>
+        <p class="sub">Эти сайты никогда не обрабатываются. Банки, Госуслуги, Яндекс, VK, маркетплейсы и игры с античитом (~150 доменов) уже исключены встроенным списком — сюда добавляйте свои.</p>
+        <textarea data-setting-list="excluded_domains" rows="5" placeholder="sberbank.ru"></textarea>
+      </section>
+
+      <!-- Диагностика -->
+      <section class="page" data-page="diag">
+        <h1>Диагностика</h1>
+        <p class="sub">Почему сайт не открывается: подмена DNS, блокировка по IP или DPI.</p>
+        <div class="card row gap">
+          <input id="diag-host" placeholder="youtube.com" spellcheck="false" />
+          <button class="btn accent" id="diag-run">Проверить</button>
+        </div>
+        <div class="card diag-out hidden" id="diag-out"></div>
+        <h2>Конфликты</h2>
+        <div class="cards" id="conflicts"></div>
+        <h2>VPN-туннели</h2>
+        <p class="sub">Трафик через эти адаптеры Proryv не трогает — иначе ломается VPN.</p>
+        <div class="cards" id="tunnels"></div>
+      </section>
+
+      <!-- Внешний вид -->
+      <section class="page" data-page="appearance">
+        <h1>Внешний вид</h1>
+        <div class="cards">
+          <div class="card row"><div><b>Тема</b><small>Светлая тема появится позже.</small></div>
+            <select data-setting="theme"><option value="dark">Тёмная</option><option value="system">Как в системе</option></select></div>
+          <div class="card row"><div><b>Фон окна</b><small>Требуется перезапуск. Mica работает только в Windows 11.</small></div>
+            <select data-setting="backdrop"><option value="mica">Mica</option><option value="acrylic">Acrylic</option><option value="none">Нет</option></select></div>
+          <div class="card row"><div><b>Акцентный цвет</b><small>Цвет переключателей, кнопок и индикаторов.</small></div><div class="swatches" data-accent-picker></div></div>
+          <div class="card row"><div><b>Анимации</b><small>Отключите для слабых ПК.</small></div><label class="toggle"><input type="checkbox" data-setting="animations"><i></i></label></div>
+          <div class="card row"><div><b>Язык</b><small>Нужен перезапуск.</small></div>
+            <select data-setting="language"><option value="system">Как в системе</option><option value="ru">Русский</option><option value="en">English</option></select></div>
+        </div>
+      </section>
+
+      <!-- Общие -->
+      <section class="page" data-page="general">
+        <div class="actions3">
+          <button class="card action" id="act-import"><span data-icon="download"></span>Импорт настроек</button>
+          <button class="card action" id="act-reset"><span data-icon="rotate"></span>Сбросить настройки</button>
+          <button class="card action" id="act-export"><span data-icon="upload"></span>Экспорт настроек</button>
+        </div>
+        <h1>Запуск</h1>
+        <div class="cards">
+          <div class="card row" data-keywords="автозапуск автозагрузка виндовс"><div><b>Запускать вместе с Windows</b><small>Через Планировщик задач — без окна «Разрешить изменения» при входе.</small></div><label class="toggle"><input type="checkbox" data-setting="autostart"><i></i></label></div>
+          <div class="card row"><div><b>Запускать свёрнутым в трей</b><small>При автозапуске окно не открывается, Proryv сидит в трее.</small></div><label class="toggle"><input type="checkbox" data-setting="start_minimized"><i></i></label></div>
+          <div class="card row"><div><b>Включать обход при запуске</b></div><label class="toggle"><input type="checkbox" data-setting="enable_on_launch"><i></i></label></div>
+          <div class="card row"><div><b>Сворачивать в трей при закрытии</b><small>Крестик прячет окно, обход продолжает работать. Выйти — через значок в трее.</small></div><label class="toggle"><input type="checkbox" data-setting="minimize_to_tray"><i></i></label></div>
+        </div>
+        <h1>Сеть</h1>
+        <div class="cards">
+          <div class="card row" data-keywords="ютуб квик udp"><div><b>Блокировать QUIC к YouTube</b><small>Только UDP 443 к серверам Google/YouTube — браузер пойдёт по TCP, где работает обход. VPN и игры, которым нужен UDP 443, не затрагиваются.</small></div><label class="toggle"><input type="checkbox" data-setting="block_quic"><i></i></label></div>
+          <div class="card row" data-keywords="днс dns doh"><div><b>Защищённый DNS (DoH)</b><small>Защищает от подмены DNS провайдером.</small></div><label class="toggle"><input type="checkbox" data-setting="doh"><i></i></label></div>
+          <div class="card row"><div><b>Сервер DoH</b></div>
+            <select data-setting="doh_server">
+              <option value="https://cloudflare-dns.com/dns-query">Cloudflare</option>
+              <option value="https://dns.google/dns-query">Google</option>
+              <option value="https://dns.quad9.net/dns-query">Quad9</option>
+              <option value="https://dns.adguard-dns.com/dns-query">AdGuard</option>
+            </select></div>
+        </div>
+        <h1>Прочее</h1>
+        <div class="cards">
+          <div class="card row"><div><b>Проверять обновления</b><small>При запуске смотреть, нет ли новой версии на GitHub, и предлагать обновиться в один клик.</small></div><label class="toggle"><input type="checkbox" data-setting="check_updates"><i></i></label></div>
+          <div class="card row"><div><b>Уведомления</b><small>Когда стратегия сменилась или что-то сломалось.</small></div><label class="toggle"><input type="checkbox" data-setting="notifications"><i></i></label></div>
+          <div class="card row"><div><b>Показать мастер настройки снова</b></div><button class="btn" id="act-wizard">Открыть</button></div>
+        </div>
+      </section>
+
+      <!-- О программе -->
+      <section class="page" data-page="about">
+        <div class="about">
+          <div class="logo big" data-icon="logo"></div>
+          <h1>Proryv <span class="ver" id="about-ver"></span></h1>
+          <p class="sub">Обход DPI-блокировок с автоподбором стратегий под вашего провайдера. Написано на Rust.</p>
+          <div class="cards narrow">
+            <div class="card row" data-keywords="обновить апдейт версия update"><div><b>Обновления</b><small id="upd-status">Новые версии ставятся прямо из программы, без скачивания вручную.</small></div>
+              <button class="btn" id="upd-check">Проверить</button></div>
+            <div class="card row"><div><b>Лицензия</b></div><span>MIT</span></div>
+            <div class="card row"><div><b>Движок</b></div><span>proryv-core</span></div>
+            <div class="card row"><div><b>Перехват пакетов</b></div><span>WinDivert</span></div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="bottombar main-bar">
+      <span class="dirty hidden" id="dirty">Есть несохранённые изменения</span>
+      <div class="grow"></div>
+      <button class="btn" id="btn-revert">Отменить</button>
+      <button class="btn accent" id="btn-save">Сохранить</button>
+      <button class="btn" id="btn-close">Закрыть</button>
+    </footer>
+  </div>
+
+  <div class="modal hidden" id="modal">
+    <div class="modal-box card">
+      <h1 id="modal-title"></h1>
+      <p class="sub" id="modal-sub"></p>
+      <textarea id="modal-text" rows="12" spellcheck="false"></textarea>
+      <div class="row gap modal-actions">
+        <div class="grow"></div>
+        <button class="btn" id="modal-cancel">Закрыть</button>
+        <button class="btn accent" id="modal-ok"></button>
+      </div>
+    </div>
+  </div>
+
+  <div class="toast hidden" id="toast"></div>
+  <script src="mock-data.js"></script>
+  <script src="icons.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

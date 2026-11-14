@@ -1,0 +1,18 @@
+[package]
+name = "proryv-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Движок обхода DPI: разбор пакетов, стратегии, планирование сегментов"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+aes = "0.8"
+aes-gcm = "0.10"
+hkdf = "0.12"
+sha2 = "0.10"
+
+[target.'cfg(windows)'.dependencies]
+libloading = "0.8"
