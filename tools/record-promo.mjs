@@ -18,7 +18,8 @@ const page = await browser.newPage({ viewport: null, acceptDownloads: true });
 page.on('console', (m) => m.type() === 'error' && console.log('console:', m.text()));
 page.on('crash', () => console.log('страница упала'));
 page.on('pageerror', (e) => console.log('ошибка на странице:', e.message));
-await page.goto(`${base}/promo/index.html?rec=1`);
+// EN=1 — английская версия ролика.
+await page.goto(`${base}/promo/index.html?rec=1${process.env.EN ? '&lang=en' : ''}`);
 
 const download = await page.waitForEvent('download', { timeout: 240_000 });
 const raw = outDir + 'raw-' + download.suggestedFilename();
@@ -50,6 +51,7 @@ const md = [
   ...rows.map((c, i) => `| ${i + 1} | ${tc(c.t)} | ${c.what} | ${c.sound} |`),
   '',
 ].join('\n');
-writeFileSync(outDir + 'sfx-cues.md', md);
-writeFileSync(outDir + 'sfx-cues.csv', '﻿' + ['n;timecode;seconds;id;event;sound', ...rows.map((c, i) => [i + 1, tc(c.t), c.t, c.id, c.what, c.sound].map((v) => `"${String(v).replace(/"/g, '""')}"`).join(';'))].join('\r\n'));
+const sfx = process.env.EN ? 'sfx-cues-en' : 'sfx-cues';
+writeFileSync(outDir + sfx + '.md', md);
+writeFileSync(outDir + sfx + '.csv', '﻿' + ['n;timecode;seconds;id;event;sound', ...rows.map((c, i) => [i + 1, tc(c.t), c.t, c.id, c.what, c.sound].map((v) => `"${String(v).replace(/"/g, '""')}"`).join(';'))].join('\r\n'));
 console.log(`${file}\n${rows.length} событий, ${done.length.toFixed(1)} с, ${done.mime}`);

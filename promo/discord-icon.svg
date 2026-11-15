@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- Аватар Discord-сервера: Discord обрезает в круг, поэтому фон во весь квадрат, щит — внутри круга. -->
+  <defs>
+    <radialGradient id="bg" cx="0.5" cy="0.38" r="0.75">
+      <stop offset="0" stop-color="#2a3a4a"/>
+      <stop offset="0.6" stop-color="#1a2129"/>
+      <stop offset="1" stop-color="#11161b"/>
+    </radialGradient>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#9ad8f0"/>
+      <stop offset="1" stop-color="#3f8fb8"/>
+    </linearGradient>
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="18"/>
+    </filter>
+  </defs>
+  <rect width="512" height="512" fill="url(#bg)"/>
+  <g transform="translate(256 262) scale(0.9) translate(-256 -244)">
+    <path d="M256 70 106 140v100c0 90 64 156 150 178 86-22 150-88 150-178V140Z" fill="#7cc4e4" opacity="0.35" filter="url(#glow)"/>
+    <path d="M256 70 106 140v100c0 90 64 156 150 178 86-22 150-88 150-178V140Z" fill="url(#g)"/>
+    <path d="M176 270l58-66 42 68 60-72" fill="none" stroke="#10181d" stroke-width="34" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+</svg>

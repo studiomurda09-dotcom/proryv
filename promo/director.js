@@ -7,6 +7,11 @@
 const $ = (s) => document.querySelector(s);
 const W = 1920, H = 1080, AW = 1130, AH = 720;
 const win = $('#win'), frame = $('#app'), cur = $('#cursor');
+// ?lang=en — английская версия: приложение, титры, заставка и финал на английском.
+const EN = new URLSearchParams(location.search).get('lang') === 'en';
+const L = (ru, en) => (EN ? en : ru);
+frame.src = `/index.html?shot=1&lang=${EN ? 'en' : 'ru'}&p=home#home`;
+if (EN) { document.documentElement.lang = 'en'; document.querySelectorAll('[data-en]').forEach((e) => (e.textContent = e.dataset.en)); }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const clamp = (v, a, b) => Math.min(Math.max(v, a), b);
 
@@ -114,7 +119,7 @@ async function stopRecording() {
   const blob = new Blob(chunks, { type: mime });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = mime.startsWith('video/mp4') ? 'proryv-promo.mp4' : 'proryv-promo.webm';
+  a.download = (EN ? 'proryv-promo-en' : 'proryv-promo') + (mime.startsWith('video/mp4') ? '.mp4' : '.webm');
   document.body.appendChild(a); a.click();
 }
 
@@ -148,7 +153,7 @@ async function play() {
   cur.style.opacity = 1; placeCursor({ x: W / 2 + 260, y: H - 140 }, 0);
 
   // 3. Включение
-  await caption('Одна кнопка', 'Включил — и YouTube, Discord, Telegram открываются');
+  await caption(L('Одна кнопка', 'One button'), L('Включил — и YouTube, Discord, Telegram открываются', 'Turn it on — YouTube, Discord and Telegram just work'));
   focus(q('.hero'), 1.75); await sleep(1100);
   await click(q('#power'), 'Нажатие большой кнопки включения', { id: 'power_click', sound: 'Тяжёлый клик кнопки питания' });
   await sleep(500);
@@ -162,7 +167,7 @@ async function play() {
   // 4. Автоподбор
   overview(900); await sleep(950);
   await click(q('.sidebar a[data-page="autotune"]'), 'Переход в «Автоподбор»');
-  await caption('Автоподбор под провайдера', 'Сам находит дыру в DPI именно вашего провайдера');
+  await caption(L('Автоподбор под провайдера', 'Tuned to your provider'), L('Сам находит дыру в DPI именно вашего провайдера', 'Finds a hole in your provider’s DPI by itself'));
   focus(q('#at-start').closest('.card'), 1.6); await sleep(1100);
   const results = q('#at-results');
   const mo = new MutationObserver((list) => list.forEach((m) => m.addedNodes.forEach((n) => {
@@ -176,7 +181,7 @@ async function play() {
   await sleep(250);
   cue('success', 'Подсветка лучшей стратегии и плашка «Готово»', 'Успех: светлый аккорд / чайм');
   focus(q('#at-summary'), 1.7); await sleep(1900);
-  await caption('Самолечение', 'Провайдер что-то поменял — Proryv сам переподберёт стратегию');
+  await caption(L('Самолечение', 'Self-healing'), L('Провайдер что-то поменял — Proryv сам переподберёт стратегию', 'Provider changed something? Proryv re-tunes by itself'));
   overview(900); await sleep(700);
   app().toast('Самолечение: YouTube → «ALT11: фейки (ts) + наложение»');
   cue('toast', 'Всплывает уведомление «Самолечение»', 'Мягкий «поп» уведомления');
@@ -185,7 +190,7 @@ async function play() {
 
   // 5. Пресеты, голос Discord и Telegram
   await click(q('.sidebar a[data-page="presets"]'), 'Переход в «Пресеты»');
-  await caption('Discord с голосом, Roblox, Telegram', 'Нужное включается переключателем');
+  await caption(L('Discord с голосом, Roblox, Telegram', 'Discord voice, Roblox, Telegram'), L('Нужное включается переключателем', 'Everything is one toggle away'));
   focus(q('#preset-list'), 1.45); await sleep(1100);
   const roblox = q('input[data-preset="roblox"]').closest('.toggle');
   await click(roblox, 'Переключатель Roblox — вкл', { id: 'toggle_on', sound: 'Щелчок тумблера (вкл)' });
@@ -202,7 +207,7 @@ async function play() {
   // 6. Стратегии
   overview(900); await sleep(400);
   await click(q('.sidebar a[data-page="strategies"]'), 'Переход в «Стратегии»');
-  await caption('Видно, как режется пакет', 'Фейки и части ClientHello — наглядно');
+  await caption(L('Видно, как режется пакет', 'See how the packet is cut'), L('Фейки и части ClientHello — наглядно', 'Fakes and ClientHello parts, visualized'));
   focus(q('.card.preview'), 1.55); await sleep(1100);
   await click(q('#pv-host'), 'Клик в поле адреса', { after: 150 });
   await typeText(q('#pv-host'), 'discord.com', 'Поле адреса');
@@ -215,11 +220,11 @@ async function play() {
 
   // 7. Поиск
   overview(900); await sleep(950);
-  await caption('Поиск по всем настройкам', 'Ctrl+F — и сразу к нужному');
+  await caption(L('Поиск по всем настройкам', 'Search every setting'), L('Ctrl+F — и сразу к нужному', 'Ctrl+F and jump right to it'));
   doc().dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyF', key: 'f', ctrlKey: true, bubbles: true }));
   cue('search_open', 'Открывается строка поиска (Ctrl+F)', 'Короткий «поп»');
   await moveTo(q('#search-input'));
-  await typeText(q('#search-input'), 'голос', 'Поиск');
+  await typeText(q('#search-input'), L('голос', 'voice'), 'Поиск');
   cue('search_results', 'Выпадают результаты поиска', 'Лёгкий шелест списка');
   await sleep(1000);
   await click(q('#search-results button'), 'Клик по результату', { after: 100, mousedown: true });
@@ -233,11 +238,11 @@ async function play() {
   // 8. Английский
   overview(900); await sleep(400);
   await click(q('.sidebar a[data-page="appearance"]'), 'Переход во «Внешний вид»');
-  await caption('Русский и English', 'Язык меняется на лету');
+  await caption(L('Русский и English', 'English and Russian'), L('Язык меняется на лету', 'Switch the language on the fly'));
   const lang = q('select[data-setting="language"]');
   focus(lang.closest('.card'), 1.7); await sleep(1100);
   await click(lang, 'Выбор языка', { after: 300 });
-  lang.value = 'en'; lang.dispatchEvent(new Event('change', { bubbles: true }));
+  lang.value = L('en', 'ru'); lang.dispatchEvent(new Event('change', { bubbles: true }));
   cue('lang_switch', 'Весь интерфейс мгновенно становится английским', 'Глитч/«перелистывание» + свуш');
   await sleep(700);
   overview(1000); await sleep(1900);
