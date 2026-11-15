@@ -8,17 +8,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::{http, tls};
 
-/// Опорная точка для позиции разреза.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Anchor {
-    /// Начало payload.
     Start,
-    /// Начало имени сайта (SNI или Host).
     HostStart,
-    /// Середина имени сайта.
     HostMid,
-    /// Конец имени сайта.
     HostEnd,
     /// Середина домена второго уровня («you|tube» в www.youtube.com).
     Midsld,
@@ -26,7 +21,6 @@ pub enum Anchor {
     SniExt,
 }
 
-/// Позиция в payload: опорная точка + сдвиг.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Pos {
     pub anchor: Anchor,
@@ -69,29 +63,21 @@ pub enum FakeSni {
     Random,
 }
 
-/// Один шаг стратегии.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Desync {
-    /// Разрезать на два TCP-сегмента.
     Split { at: Pos },
-    /// Разрезать на несколько сегментов.
     MultiSplit { at: Vec<Pos> },
-    /// Разрезать и отправить части в обратном порядке.
     Disorder { at: Pos },
-    /// Разрезать в нескольких местах и отправить все части задом наперёд.
     MultiDisorder { at: Vec<Pos> },
     /// seqovl: перед первым куском подложить `len` байт поддельного ClientHello
     /// с номером последовательности «из прошлого». Сервер их отбросит, DPI — прочитает.
     SeqOverlap { len: u16, sni: String },
-    /// Перед настоящими данными отправить поддельный ClientHello.
     Fake { ttl: u8, fooling: Vec<Fooling>, sni: FakeSni, repeats: u8 },
     /// Разбить одну TLS-запись на две (меняет сами байты, сервер соберёт).
     TlsRecordSplit { at: Pos },
     /// HTTP: «Host:» → «hoSt:».
     HostCase,
-    /// Пауза между отправкой сегментов, мс.
-    Delay { ms: u32 },
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -124,7 +110,6 @@ pub enum SegKind {
     Fake,
 }
 
-/// Сегмент, который движок отправит в сеть.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Segment {
     pub kind: SegKind,
@@ -133,9 +118,6 @@ pub struct Segment {
     pub data: Vec<u8>,
     pub ttl: Option<u8>,
     pub fooling: Vec<Fooling>,
-    /// Пауза перед отправкой, мс.
-    pub delay_ms: u32,
-    /// Подпись для интерфейса.
     pub label: String,
 }
 
@@ -156,7 +138,6 @@ struct Ctx {
 }
 
 impl Ctx {
-    /// Смещение и длина домена второго уровня внутри имени.
     fn sld(&self) -> Option<(usize, usize)> {
         let host = self.host.as_deref()?;
         let labels: Vec<&str> = host.split('.').collect();
@@ -208,7 +189,6 @@ fn next_rand(seed: &mut u64) -> u64 {
     x
 }
 
-/// Разбить TLS-запись на две в точке `at` (смещение внутри payload).
 fn tls_record_split(p: &[u8], at: usize) -> Option<Vec<u8>> {
     let body_len = ((p[3] as usize) << 8) | p[4] as usize;
     if at <= 5 || at >= 5 + body_len || 5 + body_len > p.len() {
@@ -226,7 +206,6 @@ fn tls_record_split(p: &[u8], at: usize) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// Построить план отправки для первого пакета соединения.
 pub fn plan(original: &[u8], strategy: &Strategy, mut seed: u64) -> Plan {
     let mut payload = original.to_vec();
     let mut ctx = context(&payload);
@@ -254,10 +233,9 @@ pub fn plan(original: &[u8], strategy: &Strategy, mut seed: u64) -> Plan {
     }
     let len = payload.len();
 
-    // 2. Точки разреза, порядок и задержка.
+    // 2. Точки разреза и порядок.
     let mut cuts = Vec::new();
     let mut disorder = false;
-    let mut delay = 0;
     for step in &strategy.steps {
         match step {
             Desync::Split { at } => cuts.extend(resolve(*at, &ctx, len)),
@@ -270,7 +248,6 @@ pub fn plan(original: &[u8], strategy: &Strategy, mut seed: u64) -> Plan {
                 cuts.extend(at.iter().filter_map(|p| resolve(*p, &ctx, len)));
                 disorder = true;
             }
-            Desync::Delay { ms } => delay = *ms,
             _ => {}
         }
     }
@@ -309,14 +286,12 @@ pub fn plan(original: &[u8], strategy: &Strategy, mut seed: u64) -> Plan {
                     data: data.clone(),
                     ttl: fooling.contains(&Fooling::Ttl).then_some(*ttl),
                     fooling: fooling.clone(),
-                    delay_ms: 0,
                     label: format!("фейк #{} ({name})", r + 1),
                 });
             }
         }
     }
 
-    // 4. Настоящие куски.
     let mut bounds = vec![0];
     bounds.extend(&cuts);
     bounds.push(len);
@@ -329,15 +304,11 @@ pub fn plan(original: &[u8], strategy: &Strategy, mut seed: u64) -> Plan {
             data: payload[w[0]..w[1]].to_vec(),
             ttl: None,
             fooling: vec![],
-            delay_ms: 0,
             label: format!("часть {} [{}..{})", i + 1, w[0], w[1]),
         })
         .collect();
     if disorder && real.len() > 1 {
         real.reverse();
-    }
-    for s in real.iter_mut().skip(1) {
-        s.delay_ms = delay;
     }
 
     // 5. seqovl: к куску с начала данных спереди приклеиваем поддельный ClientHello.
@@ -394,7 +365,6 @@ impl Strategy {
                 }
                 Desync::TlsRecordSplit { at } => format!("tlsrec={}", pos(at)),
                 Desync::HostCase => "hostcase".into(),
-                Desync::Delay { ms } => format!("delay={ms}ms"),
             })
             .collect::<Vec<_>>()
             .join("  ")

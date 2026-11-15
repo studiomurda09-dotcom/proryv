@@ -71,7 +71,7 @@ const I18N_EN = {
   'Фейки (ts)': 'Fakes (ts)', 'Наложение (Google)': 'Overlap (Google)', 'Наложение (4pda)': 'Overlap (4pda)',
   'Фейки + обратный порядок': 'Fakes + reverse order', 'Разрез посередине имени': 'Split in the middle of the name', 'Беспорядок': 'Disorder',
   'Мультиразрез': 'Multi-split', 'Фейк (TTL) + разрез': 'Fake (TTL) + split', 'Фейк (badseq) + беспорядок': 'Fake (badseq) + disorder',
-  'Медленный разрез': 'Slow split', 'HTTP: регистр Host': 'HTTP: Host case',
+ 'HTTP: регистр Host': 'HTTP: Host case',
   'Разрез на 2-м байте и сразу после начала SNI, наложение 679 байт фейка к google.com (general ALT7).': 'Split at byte 2 and right after the SNI start, 679-byte fake overlap to google.com (general ALT7).',
   '8 фейков, которые сервер отбросит по timestamp, затем наложение 681 байт (general ALT11).': '8 fakes the server drops by timestamp, then a 681-byte overlap (general ALT11).',
   '6 фейковых ClientHello к google.com с уменьшенным timestamp (general ALT10).': '6 fake ClientHellos to google.com with a lowered timestamp (general ALT10).',
@@ -83,7 +83,6 @@ const I18N_EN = {
   'Режет перед, в середине и после имени сайта.': 'Splits before, in the middle of and after the site name.',
   'Сначала поддельный ClientHello с малым TTL, потом настоящий с разрезом.': 'First a fake ClientHello with a low TTL, then the real one split.',
   'Фейк с неверным seq и отправка частей задом наперёд.': 'A fake with a wrong seq and the parts sent in reverse order.',
-  'Разрез с паузой между частями — часть DPI не дожидается.': 'A split with a pause between parts — some DPI does not wait.',
   'Для обычного HTTP: hoSt вместо Host + разрез.': 'For plain HTTP: hoSt instead of Host + split.',
   'Без обхода': 'No bypass', 'проверка без обхода': 'check without bypass',
 
@@ -205,7 +204,7 @@ const I18N_RX = [
 const trWord = (s) => I18N_EN[s] || s;
 const trBytes = (s) => s.replace(/ ГБ$/, ' GB').replace(/ МБ$/, ' MB').replace(/ КБ$/, ' KB').replace(/ Б$/, ' B');
 const trPlan = (s) => s.replace(/фейк #/g, 'fake #').replace(/часть /g, 'part ').replace(/(\d+) Б/g, '$1 B')
-  .replace(/пауза (\d+) мс/g, 'pause $1 ms');
+  ;
 
 let LANG = 'ru';
 

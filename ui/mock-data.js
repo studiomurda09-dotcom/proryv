@@ -32,7 +32,8 @@ window.MOCK_DATA = {
     "telegram": false,
     "telegram_port": 1443,
     "telegram_secret": "",
-    "theme": "dark"
+    "theme": "dark",
+    "update_base": true
   },
   "presets": [
     {
@@ -280,7 +281,6 @@ window.MOCK_DATA = {
         "alt7",
         "seqovl_4pda",
         "multisplit_host",
-        "slow_split",
         "http_hostcase"
       ],
       "tcp_ports": [
@@ -554,30 +554,6 @@ window.MOCK_DATA = {
       ]
     },
     {
-      "description": "Разрез с паузой между частями — часть DPI не дожидается.",
-      "id": "slow_split",
-      "name": "Медленный разрез",
-      "steps": [
-        {
-          "at": [
-            {
-              "add": 1,
-              "anchor": "start"
-            },
-            {
-              "add": 0,
-              "anchor": "host_mid"
-            }
-          ],
-          "kind": "multi_split"
-        },
-        {
-          "kind": "delay",
-          "ms": 40
-        }
-      ]
-    },
-    {
       "description": "Для обычного HTTP: hoSt вместо Host + разрез.",
       "id": "http_hostcase",
       "name": "HTTP: регистр Host",
@@ -595,5 +571,5 @@ window.MOCK_DATA = {
       ]
     }
   ],
-  "version": "0.1.0"
+  "version": "0.2.1"
 };

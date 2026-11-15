@@ -78,7 +78,6 @@ fn fold(mut acc: u32) -> u16 {
     !(acc as u16)
 }
 
-/// Пересчитать контрольные суммы IPv4 и TCP.
 pub fn fix_checksums(p: &mut [u8], info: &TcpInfo) {
     let t = info.ip_hdr_len;
     let tcp_len = p.len() - t;
@@ -136,12 +135,10 @@ pub fn parse_udp(p: &[u8]) -> Option<UdpInfo> {
     Some(UdpInfo { v6, ip_hdr_len: ihl, src_port: be16(p, ihl), dst_port: be16(p, ihl + 2) })
 }
 
-/// IPv4-адрес назначения (для IPv6 — None).
 pub fn dst_ipv4(p: &[u8]) -> Option<u32> {
     (p.first()? >> 4 == 4 && p.len() >= 20).then(|| u32::from_be_bytes([p[16], p[17], p[18], p[19]]))
 }
 
-/// Собрать UDP-пакет с теми же адресами/портами и другим payload.
 pub fn build_udp(orig: &[u8], info: &UdpInfo, payload: &[u8]) -> Vec<u8> {
     let t = info.ip_hdr_len;
     let mut p = Vec::with_capacity(t + 8 + payload.len());
@@ -181,7 +178,6 @@ pub fn is_discord_or_stun(payload: &[u8]) -> bool {
     discord || stun
 }
 
-/// Исходящий UDP на порт 443 (QUIC)?
 pub fn is_quic(p: &[u8]) -> bool {
     match p.first().map(|b| b >> 4) {
         Some(4) => {
@@ -329,7 +325,6 @@ pub(crate) mod tests {
             data: b"456".to_vec(),
             ttl: Some(3),
             fooling: vec![Fooling::Ttl, Fooling::Md5Sig],
-            delay_ms: 0,
             label: String::new(),
         };
         let p = build_segment(&orig, &info, &seg);
@@ -354,7 +349,7 @@ pub(crate) mod tests {
         p[2..4].copy_from_slice(&len.to_be_bytes());
         let info = parse_tcp(&p).unwrap();
         let seg = Segment { kind: SegKind::Fake, seq_offset: 0, data: b"x".to_vec(), ttl: None,
-            fooling: vec![Fooling::Ts], delay_ms: 0, label: String::new() };
+            fooling: vec![Fooling::Ts], label: String::new() };
         let out = build_segment(&p, &info, &seg);
         let tsval = u32::from_be_bytes([out[44], out[45], out[46], out[47]]);
         assert_eq!(tsval, 0x0010_0000u32.wrapping_sub(600_000));
@@ -404,7 +399,7 @@ pub(crate) mod tests {
         let orig = make_v4(b"abc", 1);
         let info = parse_tcp(&orig).unwrap();
         let seg = Segment { kind: SegKind::Fake, seq_offset: 0, data: b"x".to_vec(), ttl: None,
-            fooling: vec![Fooling::BadSum, Fooling::BadSeq], delay_ms: 0, label: String::new() };
+            fooling: vec![Fooling::BadSum, Fooling::BadSeq], label: String::new() };
         let p = build_segment(&orig, &info, &seg);
         assert!(!checksum_ok(&p));
         assert_eq!(parse_tcp(&p).unwrap().seq, 1u32.wrapping_sub(10_000));

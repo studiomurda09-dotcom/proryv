@@ -37,7 +37,6 @@ struct AppState {
 
 // ---------------------------------------------------------------- Telegram
 
-/// Запустить/остановить прокси Telegram по настройкам.
 fn sync_tg(state: &AppState) {
     let mut s = state.settings.lock().unwrap();
     let mut tg = state.tg.lock().unwrap();
@@ -196,7 +195,6 @@ fn system_is_russian() -> bool {
     true
 }
 
-/// Уведомление Windows, если оно включено в настройках.
 fn notify(app: &AppHandle, title: (&str, &str), body: (String, String)) {
     use tauri_plugin_notification::NotificationExt;
     let state = app.state::<AppState>();
@@ -212,7 +210,6 @@ fn notify(app: &AppHandle, title: (&str, &str), body: (String, String)) {
         .show();
 }
 
-/// Название пресета для уведомления.
 fn preset_title(id: &str, en: bool) -> String {
     let en_name = match id {
         "general" => Some("Other blocked sites"),
@@ -313,7 +310,6 @@ fn set_enabled(state: State<AppState>, enabled: bool) -> Status {
     }
 }
 
-/// Предпросмотр: как стратегия разрежет ClientHello для указанного сайта.
 #[tauri::command]
 fn preview_plan(host: String, strategy_id: String) -> Result<Plan, String> {
     let strategy = base::strategies()
@@ -344,7 +340,6 @@ fn check_conflicts() -> Vec<Conflict> {
         .collect()
 }
 
-/// VPN-туннели, трафик которых Proryv пропускает без обработки.
 #[tauri::command(async)]
 fn tunnel_interfaces() -> Vec<String> {
     #[cfg(windows)]
@@ -357,7 +352,6 @@ fn tunnel_interfaces() -> Vec<String> {
     vec![]
 }
 
-/// Почему сайт не открывается: DNS, IP или DPI.
 #[tauri::command]
 async fn diagnose(host: String) -> Diagnosis {
     tauri::async_runtime::spawn_blocking(move || autotune::diagnose(&host)).await.expect("diagnose")
@@ -498,7 +492,6 @@ fn is_elevated() -> bool {
     false
 }
 
-/// Перезапустить программу с правами администратора (появится окно UAC).
 #[tauri::command]
 fn relaunch_as_admin(app: AppHandle) -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
@@ -557,7 +550,6 @@ fn apply_backdrop(window: &tauri::WebviewWindow, backdrop: &str) {
     let _ = window.set_effects(EffectsBuilder::new().effect(effect).build());
 }
 
-/// Сменить фон окна сразу, без перезапуска.
 #[tauri::command]
 fn set_backdrop(window: tauri::WebviewWindow, backdrop: String) {
     apply_backdrop(&window, &backdrop);
@@ -586,7 +578,6 @@ fn isp_info() -> IspInfo {
     }
 }
 
-/// Открыть страницу на GitHub проекта (например, чтобы поделиться результатом подбора).
 #[tauri::command]
 fn open_github(path: String) -> Result<(), String> {
     if path.contains(['"', ' ', '\\']) {
@@ -599,7 +590,6 @@ fn open_github(path: String) -> Result<(), String> {
 
 const DISCORD_URL: &str = "https://discord.gg/SzRm7GNyU9";
 
-/// Открыть Discord-сервер проекта в браузере.
 #[tauri::command]
 fn open_discord() -> Result<(), String> {
     hidden_cmd("explorer").arg(DISCORD_URL).status().map_err(|e| e.to_string())?;
@@ -608,7 +598,7 @@ fn open_discord() -> Result<(), String> {
 
 /// При запуске: база из кэша сразу, потом свежая с GitHub и провайдер.
 fn spawn_base_loader(app: AppHandle, cache: PathBuf) {
-    if let Some(b) = std::fs::read_to_string(&cache).ok().and_then(|s| serde_json::from_str(&s).ok()) {
+    if let Some(b) = std::fs::read_to_string(&cache).ok().and_then(|s| base::parse(&s).ok()) {
         base::set_base(b);
     }
     std::thread::spawn(move || {
@@ -643,7 +633,6 @@ struct UpdateInfo {
     notes: Option<String>,
 }
 
-/// Есть ли новая версия на GitHub (файл latest.json последнего релиза).
 #[tauri::command]
 async fn check_update(app: AppHandle) -> Result<Option<UpdateInfo>, String> {
     use tauri_plugin_updater::UpdaterExt;

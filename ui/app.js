@@ -29,13 +29,12 @@ const mockBackend = (() => {
       const v = base + (p.add || 0);
       return v > 0 && v < len ? v : null;
     };
-    let cuts = [], disorder = false, delay = 0, segs = [], payloadLen = len;
+    let cuts = [], disorder = false, segs = [], payloadLen = len;
     for (const s of strategy.steps) {
       if (s.kind === 'split') cuts.push(pos(s.at));
       if (s.kind === 'multi_split') cuts.push(...s.at.map(pos));
       if (s.kind === 'disorder') { cuts.push(pos(s.at)); disorder = true; }
       if (s.kind === 'multi_disorder') { cuts.push(...s.at.map(pos)); disorder = true; }
-      if (s.kind === 'delay') delay = s.ms;
       if (s.kind === 'tls_record_split') payloadLen += 5;
     }
     cuts = [...new Set(cuts.filter((c) => c != null))].sort((a, b) => a - b);
@@ -45,15 +44,14 @@ const mockBackend = (() => {
       for (let r = 0; r < Math.max(1, s.repeats); r++) {
         const name = s.sni.mode === 'fixed' ? s.sni.value : pool[(r * 3 + host.length) % pool.length];
         segs.push({ kind: 'fake', seq_offset: 0, data: { length: Math.max(len, helloLen(name)) },
-          ttl: s.fooling.includes('ttl') ? s.ttl : null, fooling: s.fooling, delay_ms: 0, label: `фейк #${r + 1} (${name})` });
+          ttl: s.fooling.includes('ttl') ? s.ttl : null, fooling: s.fooling, label: `фейк #${r + 1} (${name})` });
       }
     }
     const b = [0, ...cuts, payloadLen];
     let real = [];
     for (let i = 0; i < b.length - 1; i++)
-      real.push({ kind: 'real', seq_offset: b[i], data: { length: b[i + 1] - b[i] }, ttl: null, fooling: [], delay_ms: 0, label: `часть ${i + 1} [${b[i]}..${b[i + 1]})` });
+      real.push({ kind: 'real', seq_offset: b[i], data: { length: b[i + 1] - b[i] }, ttl: null, fooling: [], label: `часть ${i + 1} [${b[i]}..${b[i + 1]})` });
     if (disorder && real.length > 1) real.reverse();
-    real.slice(1).forEach((s) => (s.delay_ms = delay));
     for (const s of strategy.steps) {
       if (s.kind !== 'seq_overlap') continue;
       const f = real.find((r) => r.seq_offset === 0);
@@ -310,7 +308,6 @@ function summary(st) {
     fake: () => `fake ttl=${s.ttl} fool=${s.fooling.join('+')} x${s.repeats}`,
     tls_record_split: () => 'tlsrec=' + pos(s.at),
     host_case: () => 'hostcase',
-    delay: () => `delay=${s.ms}ms`,
   }[s.kind] || (() => s.kind))()).join('  ');
 }
 function renderStrategies() {
@@ -326,7 +323,7 @@ async function renderPreview() {
   const bar = plan.segments.map((s) =>
     `<div class="pv-seg ${s.kind}" style="flex:${s.data.length}" title="${esc(s.label)}">${s.data.length}</div>`).join('');
   const list = plan.segments.map((s, i) => {
-    const extra = [s.ttl != null && 'TTL ' + s.ttl, s.fooling.filter((f) => f !== 'ttl').join('+'), s.delay_ms && 'пауза ' + s.delay_ms + ' мс'].filter(Boolean).join(', ');
+    const extra = [s.ttl != null && 'TTL ' + s.ttl, s.fooling.filter((f) => f !== 'ttl').join('+')].filter(Boolean).join(', ');
     return `<div class="${s.kind === 'fake' ? 'f' : ''}">${i + 1}. ${esc(s.label)} — ${s.data.length} Б${extra ? ' · ' + esc(extra) : ''}</div>`;
   }).join('');
   $('#pv-out').innerHTML = `

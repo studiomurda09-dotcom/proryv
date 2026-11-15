@@ -5,6 +5,8 @@ use std::{
     ffi::{c_void, CString},
     io,
     path::{Path, PathBuf},
+    sync::Mutex,
+    time::{Duration, Instant},
 };
 
 use libloading::Library;
@@ -23,6 +25,10 @@ type RecvFn = unsafe extern "C" fn(Handle, *mut c_void, u32, *mut u32, *mut c_vo
 type SendFn = unsafe extern "C" fn(Handle, *const c_void, u32, *mut u32, *const c_void) -> i32;
 type ShutdownFn = unsafe extern "C" fn(Handle, u32) -> i32;
 type CloseFn = unsafe extern "C" fn(Handle) -> i32;
+type SetParamFn = unsafe extern "C" fn(Handle, u32, u64) -> i32;
+
+/// Очередь драйвера: по умолчанию 4096 пакетов / 4 МБ — при всплесках трафика пакеты теряются.
+const QUEUE_PARAMS: [(u32, u64); 3] = [(0, 8192), (1, 2000), (2, 8 << 20)];
 
 pub struct WinDivert {
     handle: Handle,
@@ -33,11 +39,11 @@ pub struct WinDivert {
     _lib: Library,
 }
 
-// Хэндл WinDivert потокобезопасен: recv/send/shutdown можно звать из разных потоков.
+// recv/send/shutdown WinDivert можно звать из разных потоков.
 unsafe impl Send for WinDivert {}
 unsafe impl Sync for WinDivert {}
 
-/// Где искать WinDivert.dll: рядом с exe, затем в папке из переменной PRORYV_WINDIVERT_DIR.
+/// WinDivert.dll ищется рядом с exe, затем в папке из PRORYV_WINDIVERT_DIR.
 pub fn find_dll() -> Option<PathBuf> {
     let mut dirs = Vec::new();
     if let Ok(exe) = std::env::current_exe() {
@@ -54,13 +60,11 @@ pub fn find_dll() -> Option<PathBuf> {
         .map(|d| d.join("WinDivert.dll"))
 }
 
-/// Строка фильтра WinDivert: исходящий TCP с данными на нужные порты.
 pub fn filter_string(f: &Filter) -> String {
     let ports = if f.tcp_ports.is_empty() { vec![443] } else { f.tcp_ports.clone() };
     let ports = ports.iter().map(|p| format!("tcp.DstPort == {p}")).collect::<Vec<_>>().join(" or ");
     let mut parts = vec![format!("(tcp and ({ports}) and tcp.PayloadLength > 0)")];
     if f.block_quic {
-        // Только к сетям Google/YouTube по IPv4 — VPN и прочий UDP 443 не трогаем.
         let g = super::nets_condition(&super::google_nets());
         parts.push(format!("(udp and udp.DstPort == 443 and ({g}))"));
     }
@@ -82,9 +86,27 @@ pub fn filter_string(f: &Filter) -> String {
     format!("outbound and !loopback and !impostor{skip} and ({})", parts.join(" or "))
 }
 
+/// Результат PowerShell живёт 30 с: запрос медленный, а VPN включают и выключают нечасто.
+fn cached<T: Clone>(slot: &Mutex<Option<(Instant, T)>>, load: impl FnOnce() -> T) -> T {
+    let mut s = slot.lock().unwrap();
+    if let Some((at, v)) = s.as_ref() {
+        if at.elapsed() < Duration::from_secs(30) {
+            return v.clone();
+        }
+    }
+    let v = load();
+    *s = Some((Instant::now(), v.clone()));
+    v
+}
+
 /// VPN-туннели (sing-tun, Wintun, WireGuard, TAP, Radmin…): их трафик обход ломает,
 /// а за пределы ПК он всё равно уходит зашифрованным. Возвращает (индекс, описание).
 pub fn tunnel_interfaces() -> Vec<(u32, String)> {
+    static CACHE: Mutex<Option<(Instant, Vec<(u32, String)>)>> = Mutex::new(None);
+    cached(&CACHE, load_tunnel_interfaces)
+}
+
+fn load_tunnel_interfaces() -> Vec<(u32, String)> {
     use std::os::windows::process::CommandExt;
     let out = std::process::Command::new("powershell")
         .args([
@@ -110,6 +132,11 @@ pub fn tunnel_interfaces() -> Vec<(u32, String)> {
 /// IPv4-адрес физического адаптера с маршрутом по умолчанию (не VPN).
 /// Запросы, привязанные к нему, идут напрямую к провайдеру — мимо любого туннеля.
 pub fn direct_source_ip() -> Option<String> {
+    static CACHE: Mutex<Option<(Instant, Option<String>)>> = Mutex::new(None);
+    cached(&CACHE, load_direct_source_ip)
+}
+
+fn load_direct_source_ip() -> Option<String> {
     use std::os::windows::process::CommandExt;
     let script = "Get-NetRoute -DestinationPrefix '0.0.0.0/0' | Sort-Object { $_.RouteMetric + $_.InterfaceMetric } | ForEach-Object { $a = Get-NetAdapter -InterfaceIndex $_.ifIndex -ErrorAction SilentlyContinue; $ip = (Get-NetIPAddress -InterfaceIndex $_.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue | Select-Object -First 1).IPAddress; if ($a -and $ip -and $a.Status -eq 'Up') { ($ip, $a.InterfaceDescription) -join [char]9 } }";
     let out = std::process::Command::new("powershell")
@@ -149,6 +176,7 @@ impl WinDivert {
             let send: SendFn = sym(&lib, b"WinDivertSend\0")?;
             let shutdown: ShutdownFn = sym(&lib, b"WinDivertShutdown\0")?;
             let close: CloseFn = sym(&lib, b"WinDivertClose\0")?;
+            let set_param: SetParamFn = sym(&lib, b"WinDivertSetParam\0")?;
 
             let f = CString::new(filter_string(filter)).expect("filter");
             let handle = open(f.as_ptr(), LAYER_NETWORK, 0, 0);
@@ -160,6 +188,9 @@ impl WinDivert {
                     Some(577) | Some(1275) | Some(1058) => PlatformError::DriverBlocked(err.to_string()),
                     _ => PlatformError::Io(err),
                 });
+            }
+            for (param, value) in QUEUE_PARAMS {
+                set_param(handle, param, value);
             }
             Ok(WinDivert { handle, recv, send, shutdown, close, _lib: lib })
         }

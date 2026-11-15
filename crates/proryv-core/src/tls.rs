@@ -15,7 +15,6 @@ fn u16_at(b: &[u8], i: usize) -> Option<usize> {
     Some(((*b.get(i)? as usize) << 8) | *b.get(i + 1)? as usize)
 }
 
-/// Похоже ли это на начало TLS ClientHello.
 pub fn is_client_hello(p: &[u8]) -> bool {
     p.len() >= 6 && p[0] == 0x16 && p[1] == 0x03 && p[5] == 0x01
 }

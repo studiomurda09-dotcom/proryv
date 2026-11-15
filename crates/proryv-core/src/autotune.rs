@@ -90,14 +90,17 @@ pub fn tcp_connects(ip: &str, iface: Option<&str>) -> bool {
         .is_some_and(|t| t > 0.0)
 }
 
+/// Проверить все адреса параллельно: время шага — самый медленный сайт, а не сумма.
 pub fn check_all(urls: &[&str], iface: Option<&str>) -> (usize, u64, Vec<Check>) {
-    let checks: Vec<Check> = urls.iter().map(|u| curl_check(u, iface, 7)).collect();
+    let checks: Vec<Check> = std::thread::scope(|s| {
+        let jobs: Vec<_> = urls.iter().map(|u| s.spawn(move || curl_check(u, iface, 7))).collect();
+        jobs.into_iter().map(|j| j.join().expect("curl_check")).collect()
+    });
     let ok = checks.iter().filter(|c| c.ok).count();
     let ms = checks.iter().map(|c| if c.ok { c.ms } else { 7000 }).sum();
     (ok, ms, checks)
 }
 
-/// Событие прогресса для интерфейса.
 #[derive(Serialize, Clone, Debug)]
 pub struct Progress {
     pub preset: String,
@@ -211,7 +214,6 @@ pub struct Diagnosis {
     pub direct_path: bool,
 }
 
-/// Почему сайт не открывается: DNS, блокировка по IP или DPI.
 pub fn diagnose(host: &str) -> Diagnosis {
     use std::net::ToSocketAddrs;
     let host = host.trim().trim_start_matches("https://").trim_start_matches("http://").split('/').next().unwrap_or("").to_string();
@@ -240,7 +242,6 @@ pub fn diagnose(host: &str) -> Diagnosis {
     if bogus {
         return mk("dns", format!("DNS вернул подменённый адрес ({}). Это DNS-блокировка — включите «Безопасный DNS» в браузере или смените DNS в Windows на 1.1.1.1.", ips[0]), None);
     }
-    // TCP: просто соединиться с 443 портом.
     if !tcp_connects(&ips[0], iface.as_deref()) {
         return mk("ip", format!("Сервер {} недоступен даже по TCP — похоже на блокировку по IP. Обход DPI тут не поможет, нужен VPN/прокси.", ips[0]), None);
     }

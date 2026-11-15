@@ -4,7 +4,7 @@
 use std::{
     collections::HashMap,
     sync::{
-        atomic::{AtomicU64, Ordering::Relaxed},
+        atomic::{AtomicBool, AtomicU64, Ordering::Relaxed},
         Arc, Mutex,
     },
     thread::JoinHandle,
@@ -27,8 +27,6 @@ use crate::{
 const MAX_SEG: usize = 1360;
 /// Сколько держим первый кусок ClientHello, ожидая второй.
 const HOLD_TIMEOUT: Duration = Duration::from_millis(400);
-
-// ---------------------------------------------------------------- конфигурация
 
 /// Правило: какие домены обрабатывать и какой стратегией.
 #[derive(Clone, Debug)]
@@ -158,8 +156,6 @@ impl RunConfig {
     }
 }
 
-// ---------------------------------------------------------------- статистика
-
 #[derive(Default)]
 pub struct Counters {
     pub connections: AtomicU64,
@@ -181,43 +177,56 @@ pub struct Stats {
     pub last_host: Option<String>,
 }
 
-// ---------------------------------------------------------------- обработка пакетов
-
-/// Что отправить в сеть.
 #[derive(Debug)]
 pub struct Outgoing {
     pub data: Vec<u8>,
     pub addr: Vec<u8>,
     /// Пакет изменён нами — контрольные суммы посчитаны, драйвер не должен их трогать.
     pub modified: bool,
-    pub delay_ms: u32,
 }
 
-struct Held {
+/// Первый кусок длинного ClientHello, который ждёт продолжения.
+pub struct Held {
     packet: Vec<u8>,
     addr: Vec<u8>,
     info: TcpInfo,
     at: Instant,
 }
 
+/// Общая с потоком-сторожем таблица удержанных кусков: (v6, sport, dport).
+pub type HeldMap = Arc<Mutex<HashMap<(bool, u16, u16), Held>>>;
+
+/// Отпустить куски, продолжение которых так и не пришло. Зовётся сторожем по таймеру,
+/// чтобы соединение не висело до следующего перехваченного пакета.
+pub fn release_expired(held: &HeldMap, io: &dyn PacketIo) {
+    let now = Instant::now();
+    let expired: Vec<Held> = {
+        let mut map = held.lock().unwrap();
+        let keys: Vec<_> = map.iter().filter(|(_, h)| now - h.at > HOLD_TIMEOUT).map(|(k, _)| *k).collect();
+        keys.into_iter().filter_map(|k| map.remove(&k)).collect()
+    };
+    for h in expired {
+        let _ = io.send(&h.packet, &h.addr);
+    }
+}
+
 pub struct Processor {
     cfg: RunConfig,
     stats: Arc<Counters>,
-    held: HashMap<(bool, u16, u16), Held>,
+    held: HeldMap,
     /// Счётчик пакетов по потокам (UDP и Game Filter TCP): (proto, v6, sport, dport, dst_ip).
     flows: HashMap<(u8, bool, u16, u16, u32), (u32, Instant)>,
     /// Недавние ClientHello: (v6, sport, dport, seq) — чтобы ловить повторы (самолечение).
     recent: HashMap<(bool, u16, u16, u32), Instant>,
     packets: u64,
     seed: u64,
-    /// Журнал событий для диагностики (None — выключен).
     pub trace: Option<Trace>,
 }
 
 pub type Trace = Arc<Mutex<Vec<String>>>;
 
 fn pass(data: &[u8], addr: &[u8]) -> Outgoing {
-    Outgoing { data: data.to_vec(), addr: addr.to_vec(), modified: false, delay_ms: 0 }
+    Outgoing { data: data.to_vec(), addr: addr.to_vec(), modified: false }
 }
 
 impl Processor {
@@ -233,10 +242,9 @@ impl Processor {
         }
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
         let seed = now.as_nanos() as u64 ^ 0x2545_f491_4f6c_dd1d ^ std::process::id() as u64;
-        Processor { cfg, stats, held: HashMap::new(), flows: HashMap::new(), recent: HashMap::new(), packets: 0, seed, trace: None }
+        Processor { cfg, stats, held: HeldMap::default(), flows: HashMap::new(), recent: HashMap::new(), packets: 0, seed, trace: None }
     }
 
-    /// Номер пакета в потоке (с нуля) и учёт потока.
     fn flow_index(&mut self, key: (u8, bool, u16, u16, u32), now: Instant) -> u32 {
         let e = self.flows.entry(key).or_insert((0, now));
         if now - e.1 > Duration::from_secs(60) {
@@ -277,7 +285,7 @@ impl Processor {
                 }
                 let fake = crate::quic::build_initial("www.google.com", &rnd);
                 for _ in 0..repeats {
-                    out.push(Outgoing { data: packet::build_udp(pkt, &info, &fake), addr: addr.to_vec(), modified: true, delay_ms: 0 });
+                    out.push(Outgoing { data: packet::build_udp(pkt, &info, &fake), addr: addr.to_vec(), modified: true });
                 }
                 self.stats.fakes_sent.fetch_add(repeats as u64, Relaxed);
                 self.stats.udp_desynced.fetch_add(1, Relaxed);
@@ -304,11 +312,10 @@ impl Processor {
             data: vec![0u8; 64],
             ttl: None,
             fooling: vec![strategy::Fooling::Ts],
-            delay_ms: 0,
             label: String::new(),
         };
         let mut out: Vec<Outgoing> = (0..GAME_TCP_REPEATS)
-            .map(|_| Outgoing { data: packet::build_segment(pkt, info, &fake), addr: addr.to_vec(), modified: true, delay_ms: 0 })
+            .map(|_| Outgoing { data: packet::build_segment(pkt, info, &fake), addr: addr.to_vec(), modified: true })
             .collect();
         self.stats.fakes_sent.fetch_add(GAME_TCP_REPEATS as u64, Relaxed);
         out.push(pass(pkt, addr));
@@ -324,17 +331,13 @@ impl Processor {
         }
     }
 
-    /// Обработать один перехваченный пакет.
+    pub fn held(&self) -> HeldMap {
+        self.held.clone()
+    }
+
     pub fn handle(&mut self, pkt: &[u8], addr: &[u8]) -> Vec<Outgoing> {
         let mut out = Vec::new();
-        // Отпускаем «зависшие» куски, если второй так и не пришёл.
         let now = Instant::now();
-        let expired: Vec<_> = self.held.iter().filter(|(_, h)| now - h.at > HOLD_TIMEOUT).map(|(k, _)| *k).collect();
-        for k in expired {
-            let h = self.held.remove(&k).unwrap();
-            self.log(|| format!("hold timeout port {}", k.1));
-            out.push(pass(&h.packet, &h.addr));
-        }
 
         // QUIC отбрасываем: браузер через ~секунду перейдёт на TCP, где работает обход.
         if self.cfg.block_quic && packet::is_quic(pkt) && self.cfg.is_google(packet::dst_ipv4(pkt)) {
@@ -354,8 +357,8 @@ impl Processor {
         let key = (info.v6, info.src_port, info.dst_port);
         let payload = &pkt[info.payload_off()..];
 
-        // Второй кусок ClientHello, который мы ждали?
-        if let Some(h) = self.held.remove(&key) {
+        let held = self.held.lock().unwrap().remove(&key);
+        if let Some(h) = held {
             let first_len = h.packet.len() - h.info.payload_off();
             if info.seq == h.info.seq.wrapping_add(first_len as u32) {
                 let mut combined = h.packet[h.info.payload_off()..].to_vec();
@@ -385,7 +388,7 @@ impl Processor {
                 let record_len = 5 + ((payload[3] as usize) << 8 | payload[4] as usize);
                 if record_len > payload.len() {
                     self.log(|| format!("hold: hello {} of {} B, no SNI yet (port {})", payload.len(), record_len, info.src_port));
-                    self.held.insert(key, Held { packet: pkt.to_vec(), addr: addr.to_vec(), info, at: now });
+                    self.held.lock().unwrap().insert(key, Held { packet: pkt.to_vec(), addr: addr.to_vec(), info, at: now });
                     return out;
                 }
             }
@@ -438,7 +441,6 @@ impl Processor {
                 data: packet::build_segment_ex(pkt, info, &seg, ip_id_zero),
                 addr: addr.to_vec(),
                 modified: true,
-                delay_ms: seg.delay_ms,
             });
         }
         self.stats.desynced.fetch_add(1, Relaxed);
@@ -461,7 +463,6 @@ fn split_oversized(segs: Vec<Segment>) -> Vec<Segment> {
                 out.push(Segment {
                     seq_offset: s.seq_offset.wrapping_add((i * MAX_SEG) as u32),
                     data: chunk.to_vec(),
-                    delay_ms: if i == 0 { s.delay_ms } else { 0 },
                     ..s.clone()
                 });
             }
@@ -481,19 +482,13 @@ pub fn run_loop(io: &dyn PacketIo, proc: &mut Processor) -> Result<(), PlatformE
             Err(e) => return Err(e),
         };
         for mut o in proc.handle(&buf[..n], &addr) {
-            if o.delay_ms > 0 {
-                std::thread::sleep(Duration::from_millis(o.delay_ms as u64));
-            }
             if o.modified {
                 io.mark_checksums_valid(&mut o.addr);
             }
-            // Ошибку отправки одного пакета не считаем фатальной.
             let _ = io.send(&o.data, &o.addr);
         }
     }
 }
-
-// ---------------------------------------------------------------- управление
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -516,11 +511,11 @@ pub struct Status {
 pub struct Engine {
     io: Option<Arc<dyn PacketIo>>,
     thread: Option<JoinHandle<()>>,
+    watchdog: Option<(Arc<AtomicBool>, JoinHandle<()>)>,
     presets: Vec<String>,
     started: Option<Instant>,
     stats: Arc<Counters>,
     error: Arc<Mutex<Option<String>>>,
-    /// Если задан — движок пишет сюда журнал событий.
     pub trace: Option<Trace>,
 }
 
@@ -532,6 +527,18 @@ impl Engine {
         self.presets = cfg.rules.iter().map(|r| r.preset_id.clone()).collect();
         let mut proc = Processor::new(cfg, self.stats.clone());
         proc.trace = self.trace.clone();
+        let (held, io3, stop) = (proc.held(), io.clone(), Arc::new(AtomicBool::new(false)));
+        let stop2 = stop.clone();
+        let watchdog = std::thread::Builder::new()
+            .name("proryv-held".into())
+            .spawn(move || {
+                while !stop2.load(Relaxed) {
+                    std::thread::sleep(Duration::from_millis(50));
+                    release_expired(&held, io3.as_ref());
+                }
+            })
+            .expect("spawn watchdog");
+        self.watchdog = Some((stop, watchdog));
         let (io2, err) = (io.clone(), self.error.clone());
         self.thread = Some(
             std::thread::Builder::new()
@@ -547,7 +554,6 @@ impl Engine {
         self.started = Some(Instant::now());
     }
 
-    /// Запомнить ошибку запуска (например, нет прав администратора).
     pub fn fail(&mut self, message: String) {
         self.stop();
         *self.error.lock().unwrap() = Some(message);
@@ -563,6 +569,10 @@ impl Engine {
             io.shutdown();
         }
         if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+        if let Some((stop, t)) = self.watchdog.take() {
+            stop.store(true, Relaxed);
             let _ = t.join();
         }
         self.started = None;
@@ -741,9 +751,7 @@ mod tests {
         assert_eq!(p.handle(&pkt, &[0; 80]).len(), GAME_UDP_REPEATS + 1);
         assert_eq!(p.handle(&pkt, &[0; 80]).len(), GAME_UDP_REPEATS + 1);
         assert_eq!(p.handle(&pkt, &[0; 80]).len(), 1);
-        // Чужой IP — не трогаем.
         assert_eq!(p.handle(&make_udp4(&[1; 40], [8, 8, 8, 8], 55000), &[0; 80]).len(), 1);
-        // Режим off — ничего.
         assert_eq!(mk("off").handle(&pkt, &[0; 80]).len(), 1);
         // TCP-режим: первый пакет данных к игровому серверу получает ts-фейки.
         let mut p = mk("tcp");
@@ -789,5 +797,36 @@ mod tests {
         let out2 = p.handle(&make_v4(b, 1060), &[0; 80]);
         assert!(out2.iter().all(|o| o.modified));
         assert_eq!(reassemble(&out2), hello);
+    }
+
+    #[derive(Default)]
+    struct RecordingIo(Mutex<Vec<Vec<u8>>>);
+    impl PacketIo for RecordingIo {
+        fn recv(&self, _: &mut [u8], _: &mut [u8]) -> Result<usize, crate::platform::PlatformError> {
+            Err(crate::platform::PlatformError::Shutdown)
+        }
+        fn send(&self, packet: &[u8], _: &[u8]) -> Result<(), crate::platform::PlatformError> {
+            self.0.lock().unwrap().push(packet.to_vec());
+            Ok(())
+        }
+        fn shutdown(&self) {}
+        fn addr_len(&self) -> usize {
+            80
+        }
+    }
+
+    #[test]
+    fn held_piece_is_released_without_next_packet() {
+        let hello = tls::build_client_hello("www.youtube.com");
+        let first = make_v4(&hello[..60], 1000);
+        let mut p = processor();
+        assert!(p.handle(&first, &[0; 80]).is_empty());
+        let io = RecordingIo::default();
+        release_expired(&p.held(), &io);
+        assert!(io.0.lock().unwrap().is_empty(), "до таймаута кусок держим");
+        std::thread::sleep(HOLD_TIMEOUT + Duration::from_millis(30));
+        release_expired(&p.held(), &io);
+        assert_eq!(*io.0.lock().unwrap(), vec![first]);
+        assert!(p.held().lock().unwrap().is_empty());
     }
 }

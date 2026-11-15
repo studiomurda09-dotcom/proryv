@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     presets::{self, Preset},
-    strategy::Strategy,
+    strategy::{Desync, Pos, Strategy},
 };
 
 pub const BASE_URL: &str = "https://raw.githubusercontent.com/studiomurda09-dotcom/proryv/main/data/base.json";
@@ -126,7 +126,65 @@ fn curl(args: &[&str]) -> Option<String> {
 
 /// Скачать свежую базу с GitHub.
 pub fn fetch() -> Option<Base> {
-    serde_json::from_str(&curl(&[BASE_URL])?).ok()
+    parse(&curl(&[BASE_URL])?).ok()
+}
+
+/// Разобрать и проверить базу. База приходит из сети, поэтому любое число в ней
+/// ограничено: иначе одна опечатка (или подмена) остановит обработку трафика.
+pub fn parse(text: &str) -> Result<Base, String> {
+    let b: Base = serde_json::from_str(text).map_err(|e| e.to_string())?;
+    validate(&b)?;
+    Ok(b)
+}
+
+const MAX_REPEATS: u8 = 32;
+const MAX_SEQOVL: u16 = 1500;
+const MAX_STEPS: usize = 16;
+const MAX_CUTS: usize = 16;
+const MAX_OFFSET: i32 = 4096;
+const MAX_DOMAINS: usize = 5000;
+
+fn validate(b: &Base) -> Result<(), String> {
+    let pos_ok = |p: &Pos| p.add.abs() <= MAX_OFFSET;
+    let mut ids: Vec<String> = presets::builtin_strategies().into_iter().map(|s| s.id).collect();
+    for s in &b.strategies {
+        if s.id.is_empty() || s.id.len() > 40 || !s.id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-') {
+            return Err(format!("плохой id стратегии: {:?}", s.id));
+        }
+        if s.steps.is_empty() || s.steps.len() > MAX_STEPS {
+            return Err(format!("{}: шагов должно быть 1..={MAX_STEPS}", s.id));
+        }
+        for step in &s.steps {
+            let ok = match step {
+                Desync::Split { at } | Desync::Disorder { at } | Desync::TlsRecordSplit { at } => pos_ok(at),
+                Desync::MultiSplit { at } | Desync::MultiDisorder { at } => !at.is_empty() && at.len() <= MAX_CUTS && at.iter().all(pos_ok),
+                Desync::SeqOverlap { len, sni } => *len <= MAX_SEQOVL && sni.len() <= 253,
+                Desync::Fake { ttl, repeats, .. } => *ttl <= 64 && (1..=MAX_REPEATS).contains(repeats),
+                Desync::HostCase => true,
+            };
+            if !ok {
+                return Err(format!("{}: недопустимый шаг {step:?}", s.id));
+            }
+        }
+        ids.push(s.id.clone());
+    }
+    let pids: Vec<String> = presets::builtin_presets().into_iter().map(|p| p.id).collect();
+    for (p, list) in &b.domains {
+        if !pids.contains(p) {
+            return Err(format!("domains: нет пресета {p}"));
+        }
+        if list.len() > MAX_DOMAINS || list.iter().any(|d| d.is_empty() || d.len() > 253 || d.contains(char::is_whitespace)) {
+            return Err(format!("domains.{p}: неверный список"));
+        }
+    }
+    for e in &b.isp {
+        for (p, s) in &e.strategies {
+            if !pids.contains(p) || !ids.contains(s) {
+                return Err(format!("AS{}: неизвестный пресет или стратегия {p} → {s}", e.asn));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Определить провайдера. Запрос идёт через физический адаптер, мимо VPN,
@@ -171,19 +229,19 @@ mod tests {
     }
 
     #[test]
-    fn repo_base_parses_and_points_to_real_strategies() {
-        let b: Base = serde_json::from_str(include_str!("../../../data/base.json")).expect("data/base.json");
-        let ids: Vec<String> = presets::builtin_strategies().into_iter().map(|s| s.id).chain(b.strategies.iter().map(|s| s.id.clone())).collect();
-        let pids: Vec<String> = presets::builtin_presets().into_iter().map(|p| p.id).collect();
-        for e in &b.isp {
-            for (p, s) in &e.strategies {
-                assert!(pids.contains(p), "AS{}: нет пресета {p}", e.asn);
-                assert!(ids.contains(s), "AS{}: нет стратегии {s}", e.asn);
-            }
-        }
-        for p in b.domains.keys() {
-            assert!(pids.contains(p), "domains: нет пресета {p}");
-        }
+    fn repo_base_is_valid() {
+        parse(include_str!("../../../data/base.json")).expect("data/base.json");
+    }
+
+    #[test]
+    fn dangerous_base_is_rejected() {
+        let fake = |repeats: u32| format!(r#"{{"version":2,"strategies":[{{"id":"x","name":"x","steps":[{{"kind":"fake","ttl":0,"fooling":["ts"],"sni":{{"mode":"random"}},"repeats":{repeats}}}]}}]}}"#);
+        assert!(parse(&fake(8)).is_ok());
+        assert!(parse(&fake(200)).is_err(), "200 фейков на пакет");
+        assert!(parse(r#"{"version":2,"strategies":[{"id":"x","name":"x","steps":[{"kind":"seq_overlap","len":60000,"sni":"a"}]}]}"#).is_err());
+        assert!(parse(r#"{"version":2,"strategies":[{"id":"x","name":"x","steps":[{"kind":"delay","ms":4294967295}]}]}"#).is_err());
+        assert!(parse(r#"{"version":2,"strategies":[{"id":"../x","name":"x","steps":[{"kind":"host_case"}]}]}"#).is_err());
+        assert!(parse(r#"{"version":2,"isp":[{"asn":1,"name":"x","strategies":{"youtube":"nope"}}]}"#).is_err());
     }
 
     #[test]

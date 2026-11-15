@@ -20,7 +20,6 @@ pub enum PlatformError {
     Io(#[from] std::io::Error),
 }
 
-/// Что перехватывать.
 #[derive(Debug, Clone, Default)]
 pub struct Filter {
     pub tcp_ports: Vec<u16>,
@@ -79,13 +78,11 @@ pub trait PacketIo: Send + Sync {
     fn recv(&self, buf: &mut [u8], addr: &mut [u8]) -> Result<usize, PlatformError>;
     fn send(&self, packet: &[u8], addr: &[u8]) -> Result<(), PlatformError>;
     fn shutdown(&self);
-    /// Размер блока адреса драйвера.
     fn addr_len(&self) -> usize;
     /// Пометить адрес: «контрольные суммы уже посчитаны, не трогать».
     fn mark_checksums_valid(&self, _addr: &mut [u8]) {}
 }
 
-/// Открыть перехват, подходящий для текущей ОС.
 pub fn open_default(filter: &Filter) -> Result<std::sync::Arc<dyn PacketIo>, PlatformError> {
     #[cfg(windows)]
     {

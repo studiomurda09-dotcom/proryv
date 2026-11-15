@@ -9,7 +9,6 @@ pub struct Preset {
     pub id: String,
     pub name: String,
     pub description: String,
-    /// Имя иконки для интерфейса.
     pub icon: String,
     pub tcp_ports: Vec<u16>,
     /// Диапазоны UDP-портов (QUIC, голос Discord и т.д.).
@@ -30,7 +29,6 @@ fn fake(ttl: u8, fooling: Vec<Fooling>, repeats: u8) -> Desync {
     Desync::Fake { ttl, fooling, sni: FakeSni::Random, repeats }
 }
 
-/// Библиотека стратегий, из которой собираются пресеты и автоподбор.
 pub fn builtin_strategies() -> Vec<Strategy> {
     use Anchor::*;
     let google = || FakeSni::Fixed("www.google.com".into());
@@ -65,8 +63,6 @@ pub fn builtin_strategies() -> Vec<Strategy> {
           vec![fake(4, vec![Fooling::Ttl], 2), Desync::Split { at: Pos::at(HostMid) }]),
         s("fake_badseq_disorder", "Фейк (badseq) + беспорядок", "Фейк с неверным seq и отправка частей задом наперёд.",
           vec![fake(0, vec![Fooling::BadSeq], 3), Desync::Disorder { at: Pos::at(HostMid) }]),
-        s("slow_split", "Медленный разрез", "Разрез с паузой между частями — часть DPI не дожидается.",
-          vec![Desync::MultiSplit { at: vec![Pos::abs(1), Pos::at(HostMid)] }, Desync::Delay { ms: 40 }]),
         s("http_hostcase", "HTTP: регистр Host", "Для обычного HTTP: hoSt вместо Host + разрез.",
           vec![Desync::HostCase, Desync::Split { at: Pos::at(HostMid) }]),
     ]
@@ -173,7 +169,7 @@ pub fn builtin_presets() -> Vec<Preset> {
             tcp_ports: vec![80, 443],
             udp_ports: vec![(443, 443)],
             domains: vec![],
-            strategies: st(&["alt11", "fake_multidisorder", "alt7", "seqovl_4pda", "multisplit_host", "slow_split", "http_hostcase"]),
+            strategies: st(&["alt11", "fake_multidisorder", "alt7", "seqovl_4pda", "multisplit_host", "http_hostcase"]),
         },
     ]
 }
