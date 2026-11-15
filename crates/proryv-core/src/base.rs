@@ -45,6 +45,17 @@ pub struct Isp {
 
 static BASE: RwLock<Option<Base>> = RwLock::new(None);
 static ISP: RwLock<Option<Isp>> = RwLock::new(None);
+/// Свои стратегии из режима разработчика: (все, id включённых).
+static CUSTOM: RwLock<(Vec<Strategy>, Vec<String>)> = RwLock::new((Vec::new(), Vec::new()));
+
+/// Подключить свои стратегии. Неверные (за пределами лимитов) молча не берутся.
+pub fn set_custom(list: &[crate::config::CustomStrategy]) {
+    let ok: Vec<&crate::config::CustomStrategy> = list.iter().filter(|c| check_strategy(&c.strategy).is_ok()).collect();
+    *CUSTOM.write().unwrap() = (
+        ok.iter().map(|c| c.strategy.clone()).collect(),
+        ok.iter().filter(|c| c.enabled).map(|c| c.strategy.id.clone()).collect(),
+    );
+}
 
 pub fn set_base(b: Base) {
     *BASE.write().unwrap() = Some(b);
@@ -67,9 +78,11 @@ fn find_isp(b: &Base, asn: u32) -> Option<IspEntry> {
     b.isp.iter().find(|e| e.asn == asn).cloned()
 }
 
-/// Встроенные стратегии с заменами и добавками из базы.
+/// Встроенные стратегии с заменами и добавками из базы, плюс свои.
 pub fn strategies() -> Vec<Strategy> {
-    strategies_with(base().as_ref())
+    let mut all = strategies_with(base().as_ref());
+    all.extend(CUSTOM.read().unwrap().0.iter().cloned());
+    all
 }
 fn strategies_with(b: Option<&Base>) -> Vec<Strategy> {
     let mut all = presets::builtin_strategies();
@@ -89,7 +102,12 @@ fn strategies_with(b: Option<&Base>) -> Vec<Strategy> {
 pub fn presets() -> Vec<Preset> {
     let b = base();
     let entry = b.as_ref().zip(isp()).and_then(|(b, i)| find_isp(b, i.asn));
-    presets_with(b.as_ref(), entry.as_ref())
+    let mut all = presets_with(b.as_ref(), entry.as_ref());
+    let enabled = CUSTOM.read().unwrap().1.clone();
+    for p in &mut all {
+        p.strategies.extend(enabled.iter().cloned());
+    }
+    all
 }
 fn presets_with(b: Option<&Base>, entry: Option<&IspEntry>) -> Vec<Preset> {
     let mut all = presets::builtin_presets();
@@ -145,27 +163,9 @@ const MAX_OFFSET: i32 = 4096;
 const MAX_DOMAINS: usize = 5000;
 
 fn validate(b: &Base) -> Result<(), String> {
-    let pos_ok = |p: &Pos| p.add.abs() <= MAX_OFFSET;
     let mut ids: Vec<String> = presets::builtin_strategies().into_iter().map(|s| s.id).collect();
     for s in &b.strategies {
-        if s.id.is_empty() || s.id.len() > 40 || !s.id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-') {
-            return Err(format!("плохой id стратегии: {:?}", s.id));
-        }
-        if s.steps.is_empty() || s.steps.len() > MAX_STEPS {
-            return Err(format!("{}: шагов должно быть 1..={MAX_STEPS}", s.id));
-        }
-        for step in &s.steps {
-            let ok = match step {
-                Desync::Split { at } | Desync::Disorder { at } | Desync::TlsRecordSplit { at } => pos_ok(at),
-                Desync::MultiSplit { at } | Desync::MultiDisorder { at } => !at.is_empty() && at.len() <= MAX_CUTS && at.iter().all(pos_ok),
-                Desync::SeqOverlap { len, sni } => *len <= MAX_SEQOVL && sni.len() <= 253,
-                Desync::Fake { ttl, repeats, .. } => *ttl <= 64 && (1..=MAX_REPEATS).contains(repeats),
-                Desync::HostCase => true,
-            };
-            if !ok {
-                return Err(format!("{}: недопустимый шаг {step:?}", s.id));
-            }
-        }
+        check_strategy(s)?;
         ids.push(s.id.clone());
     }
     let pids: Vec<String> = presets::builtin_presets().into_iter().map(|p| p.id).collect();
@@ -182,6 +182,30 @@ fn validate(b: &Base) -> Result<(), String> {
             if !pids.contains(p) || !ids.contains(s) {
                 return Err(format!("AS{}: неизвестный пресет или стратегия {p} → {s}", e.asn));
             }
+        }
+    }
+    Ok(())
+}
+
+/// Лимиты на одну стратегию: из сети или от пользователя — всё равно проверяем.
+pub fn check_strategy(s: &Strategy) -> Result<(), String> {
+    let pos_ok = |p: &Pos| p.add.abs() <= MAX_OFFSET;
+    if s.id.is_empty() || s.id.len() > 40 || !s.id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-') {
+        return Err(format!("плохой id стратегии: {:?}", s.id));
+    }
+    if s.steps.is_empty() || s.steps.len() > MAX_STEPS {
+        return Err(format!("{}: шагов должно быть 1..={MAX_STEPS}", s.id));
+    }
+    for step in &s.steps {
+        let ok = match step {
+            Desync::Split { at } | Desync::Disorder { at } | Desync::TlsRecordSplit { at } => pos_ok(at),
+            Desync::MultiSplit { at } | Desync::MultiDisorder { at } => !at.is_empty() && at.len() <= MAX_CUTS && at.iter().all(pos_ok),
+            Desync::SeqOverlap { len, sni } => *len <= MAX_SEQOVL && sni.len() <= 253,
+            Desync::Fake { ttl, repeats, .. } => *ttl <= 64 && (1..=MAX_REPEATS).contains(repeats),
+            Desync::HostCase => true,
+        };
+        if !ok {
+            return Err(format!("{}: недопустимый шаг {step:?}", s.id));
         }
     }
     Ok(())

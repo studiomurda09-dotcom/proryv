@@ -47,7 +47,7 @@ fn main() {
             return;
         }
     };
-    let trace = Arc::new(Mutex::new(Vec::new()));
+    let trace = Arc::new(Mutex::new(proryv_core::engine::TraceBuf::default()));
     let mut engine = Engine::default();
     engine.trace = Some(trace.clone());
     engine.start(cfg, io);
@@ -59,7 +59,7 @@ fn main() {
             "RUNNING {}s state={:?} conn={} desync={} fakes={} err={:?}\n",
             t0.elapsed().as_secs(), st.state, st.stats.connections, st.stats.desynced, st.stats.fakes_sent, st.message
         );
-        for l in trace.lock().unwrap().iter() {
+        for l in trace.lock().unwrap().lines.iter() {
             let _ = writeln!(s, "{l}");
         }
         write(&s);

@@ -2,6 +2,27 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::strategy::Strategy;
+
+/// Своя стратегия из режима разработчика.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct CustomStrategy {
+    pub strategy: Strategy,
+    /// Строка zapret, из которой стратегия получена (для показа и экспорта).
+    #[serde(default)]
+    pub zapret: String,
+    /// Участвует в пресетах и автоподборе.
+    #[serde(default = "yes")]
+    pub enabled: bool,
+    /// Последняя проверка: «YouTube 6/6».
+    #[serde(default)]
+    pub result: Option<String>,
+}
+
+fn yes() -> bool {
+    true
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(default)]
 pub struct Settings {
@@ -46,6 +67,8 @@ pub struct Settings {
     /// Скачивать базу доменов, стратегий и провайдеров с GitHub при запуске.
     pub update_base: bool,
     pub notifications: bool,
+    pub dev_mode: bool,
+    pub custom_strategies: Vec<CustomStrategy>,
 }
 
 impl Default for Settings {
@@ -78,6 +101,8 @@ impl Default for Settings {
             check_updates: true,
             update_base: true,
             notifications: true,
+            dev_mode: false,
+            custom_strategies: vec![],
         }
     }
 }

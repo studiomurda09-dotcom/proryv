@@ -87,7 +87,21 @@ const mockBackend = (() => {
     check_update: () => null,
     isp_info: () => ({ isp: { asn: 64512, name: 'Example Telecom' }, entry: { asn: 64512, name: 'Example Telecom', strategies: { youtube: 'alt11' } }, base_version: 1, done: true }),
     open_github: () => null,
-    open_discord: () => { window.open('https://discord.gg/SzRm7GNyU9'); return null; },
+    open_link: () => null,
+    zapret_parse: ({ text }) => {
+      if (!/--dpi-desync=/.test(text)) throw 'Не нашёл ни одного TCP-блока с --dpi-desync';
+      const alt11 = M.strategies.find((s) => s.id === 'alt11');
+      return [{ label: 'TCP 443 · list-google', zapret: text.trim(), recognized: ['fake ×8', 'fooling=ts', 'multisplit @1', 'seqovl 681 (www.google.com)'],
+        warnings: /autottl/.test(text) ? ['--dpi-desync-autottl пока не поддерживается — пропущен'] : [],
+        strategy: { ...alt11, id: 'custom_demo', name: 'TCP 443 · list-google', description: text.trim() } }];
+    },
+    preview_strategy: ({ host, strategy }) => plan(host, strategy),
+    dev_log: ({ since }) => {
+      const hosts = ['rr3---sn-4g5e6nsz.googlevideo.com', 'i.ytimg.com', 'gateway.discord.gg', 'www.youtube.com'];
+      const n = enabled && Math.random() < 0.6 ? 1 : 0;
+      return [since + n, n ? [`${hosts[since % 4]} → youtube / ALT11: фейки (ts) + наложение · 8 фейков + 2 части`] : []];
+    },
+    dev_check: () => [6, 6],
     install_update: () => { throw 'в браузере обновление недоступно'; },
     tg_test: () => [[2, { Ok: 340 }], [4, { Ok: 370 }], [1, { Err: 'заблокирован по IP' }]],
     diagnose: ({ host }) => ({ host, ips: ['142.251.150.4'], verdict: 'dpi', direct_path: true,
@@ -124,7 +138,7 @@ const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&l
 const ACCENTS = ['#7cc4e4', '#9fb4a3', '#a78bfa', '#f472b6', '#fb923c', '#facc15', '#4ade80', '#60a5fa'];
 const PAGE_TITLES = {
   home: 'Главная', presets: 'Пресеты', strategies: 'Стратегии', autotune: 'Автоподбор', domains: 'Списки доменов',
-  diag: 'Диагностика', appearance: 'Внешний вид', general: 'Общие настройки', about: 'О программе',
+  diag: 'Диагностика', appearance: 'Внешний вид', general: 'Общие настройки', dev: 'Разработчик', about: 'О программе',
 };
 
 const state = { saved: null, settings: null, presets: [], strategies: [], status: null, busy: false };
@@ -157,6 +171,7 @@ function syncControls() {
   });
   $$('[data-setting-list]').forEach((el) => (el.value = (s[el.dataset.settingList] || []).join('\n')));
   applyLook();
+  applyDevMode();
 }
 function markDirty() {
   const dirty = JSON.stringify(state.settings) !== JSON.stringify(state.saved);
@@ -638,6 +653,186 @@ async function installUpdate() {
   }
 }
 
+/* ---------- Разработчик ---------- */
+let devParsed = [], devSince = 0, devPaused = false, devLines = [];
+const PRESET_NAMES = { youtube: 'YouTube', discord: 'Discord', general: 'Прочие' };
+
+function applyDevMode() {
+  const on = !!state.settings.dev_mode;
+  $('#nav-dev').classList.toggle('hidden', !on);
+  if (!on && $('.page.active')?.dataset.page === 'dev') showPage('general');
+}
+function devCurrent() { return devParsed[+$('#dev-block').value || 0]; }
+function devBar(plan) {
+  return plan.segments.map((s) => `<div class="${s.kind === 'fake' ? 'f' : 'r'}" style="flex:${Math.max(s.data.length, 20)}" title="${esc(s.label)}">${s.data.length > 60 ? s.data.length : ''}</div>`).join('');
+}
+async function devShowBlock() {
+  const p = devCurrent();
+  if (!p) return;
+  $('#dev-chips').innerHTML = p.recognized.map((r) => `<span class="chip2 ok">${esc(r)}</span>`).join('')
+    + p.warnings.map((w) => `<span class="chip2 warn">${esc((w.match(/--[\w-]+|«[^»]+»|\w+=\w+|режим \w+/) || ['⚠'])[0])}</span>`).join('');
+  $('#dev-warn').innerHTML = p.warnings.map((w) => `<div>⚠ <span>${esc(w)}</span></div>`).join('');
+  $('#dev-name').value = p.strategy.name;
+  $('#dev-result').textContent = '';
+  try { $('#dev-bar').innerHTML = devBar(await call('preview_strategy', { host: 'www.youtube.com', strategy: p.strategy })); } catch {}
+}
+let devParseTimer;
+function devParse() {
+  clearTimeout(devParseTimer);
+  devParseTimer = setTimeout(async () => {
+    const text = $('#dev-z').value.trim();
+    $('#dev-err').classList.add('hidden');
+    if (!text) { $('#dev-parsed').classList.add('hidden'); return; }
+    try {
+      devParsed = await call('zapret_parse', { text });
+    } catch (e) {
+      devParsed = [];
+      $('#dev-parsed').classList.add('hidden');
+      $('#dev-err').textContent = String(e);
+      $('#dev-err').classList.remove('hidden');
+      return;
+    }
+    const sel = $('#dev-block');
+    sel.innerHTML = devParsed.map((p, i) => `<option value="${i}">${esc(p.label)}</option>`).join('');
+    sel.classList.toggle('hidden', devParsed.length < 2);
+    $('#dev-parsed').classList.remove('hidden');
+    devShowBlock();
+  }, 250);
+}
+function devStrategy() {
+  const p = devCurrent();
+  return { ...p.strategy, name: $('#dev-name').value.trim() || p.strategy.name };
+}
+async function devSaveCustom(list) {
+  state.settings.custom_strategies = list;
+  await save();
+  const boot = await call('get_bootstrap');
+  state.presets = boot.presets; state.strategies = boot.strategies;
+  renderPresets(); renderStrategies(); renderDevList();
+}
+function devUpsert(item) {
+  const list = (state.settings.custom_strategies || []).filter((c) => c.strategy.id !== item.strategy.id);
+  return [...list, item];
+}
+async function devSave() {
+  const p = devCurrent();
+  if (!p) return;
+  const old = (state.settings.custom_strategies || []).find((c) => c.strategy.id === p.strategy.id);
+  await devSaveCustom(devUpsert({ strategy: devStrategy(), zapret: p.zapret, enabled: true, result: old ? old.result : null }));
+}
+async function devCheck(strategy, preset, out) {
+  out.textContent = 'Проверяем…';
+  try {
+    const [ok, of] = await call('dev_check', { preset, strategy });
+    const text = `${PRESET_NAMES[preset] || preset} ${ok}/${of}`;
+    out.textContent = text;
+    const saved = (state.settings.custom_strategies || []).find((c) => c.strategy.id === strategy.id);
+    if (saved) await devSaveCustom(devUpsert({ ...saved, result: text }));
+    return text;
+  } catch (e) { out.textContent = String(e); }
+}
+function renderDevList() {
+  const list = state.settings.custom_strategies || [];
+  $('#dev-count').textContent = list.length;
+  $('#dev-list').innerHTML = list.map((c, i) => {
+    const r = c.result, cls = !r ? '' : /\b(\d+)\/\1\b/.test(r) ? 'ok' : / 0\//.test(r) ? 'bad' : '';
+    return `<div class="card strat" data-i="${i}">
+      <div><b>${esc(c.strategy.name)}</b><div class="z" title="${esc(c.zapret)}">${esc(c.zapret || c.strategy.description)}</div></div>
+      <span class="tag ${cls}">${esc(r || 'не проверялась')}</span>
+      <button class="icon-btn sm" data-del="${i}" title="Удалить" data-icon="x"></button>
+      <label class="toggle"><input type="checkbox" data-custom-on="${i}" ${c.enabled ? 'checked' : ''}><i></i></label>
+    </div>`;
+  }).join('');
+  renderIcons($('#dev-list'));
+}
+function devLogLine(l) {
+  const t = new Date().toTimeString().slice(0, 8);
+  return { t, l, bad: /ПОВТОР/.test(l) };
+}
+function renderDevLog() {
+  const f = $('#dev-filter').value.trim().toLowerCase();
+  const rows = devLines.filter((x) => !f || x.l.toLowerCase().includes(f));
+  const box = $('#dev-log');
+  const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 20;
+  box.innerHTML = rows.length
+    ? rows.map((x) => `<div class="${x.bad ? 'e' : ''}"><span class="t">${x.t}</span> ${esc(x.l)}</div>`).join('')
+    : `<div class="t">${state.status && state.status.state === 'running' ? 'Откройте сайт — здесь появятся строки.' : 'Включите обход и откройте сайт — здесь появятся строки.'}</div>`;
+  if (atBottom) box.scrollTop = box.scrollHeight;
+}
+async function pollDevLog() {
+  if (!state.settings.dev_mode || devPaused || $('.page.active')?.dataset.page !== 'dev') return;
+  const st = state.status && state.status.stats;
+  if (st) $('#dev-stats').innerHTML = `соединений <b>${st.connections}</b> · обработано <b>${st.desynced}</b> · фейков <b>${st.fakes_sent}</b>`;
+  try {
+    const [next, lines] = await call('dev_log', { since: devSince });
+    devSince = next;
+    if (lines.length) {
+      devLines.push(...lines.map(devLogLine));
+      devLines = devLines.slice(-400);
+      renderDevLog();
+    }
+  } catch {}
+}
+function bindDev() {
+  $('#dev-z').addEventListener('input', devParse);
+  $('#dev-block').addEventListener('change', devShowBlock);
+  $('#dev-bat').onclick = () => $('#dev-file').click();
+  $('#dev-file').addEventListener('change', async (e) => {
+    const f = e.target.files[0];
+    if (!f) return;
+    $('#dev-z').value = await f.text();
+    e.target.value = '';
+    devParse();
+  });
+  $('#dev-save').onclick = devSave;
+  $('#dev-check').onclick = () => { const p = devCurrent(); if (p) devCheck(devStrategy(), $('#dev-preset').value, $('#dev-result')); };
+  $('#dev-list').addEventListener('change', (e) => {
+    const i = e.target.dataset.customOn;
+    if (i === undefined) return;
+    const list = [...state.settings.custom_strategies];
+    list[+i] = { ...list[+i], enabled: e.target.checked };
+    devSaveCustom(list);
+  });
+  $('#dev-list').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-del]');
+    if (!b) return;
+    const list = state.settings.custom_strategies.filter((_, i) => i !== +b.dataset.del);
+    state.settings.strategy_override = state.settings.strategy_override.filter(([, s]) => list.some((c) => c.strategy.id === s) || !s.startsWith('custom_'));
+    devSaveCustom(list);
+  });
+  $('#dev-export').onclick = () => openModal({
+    title: 'Свои стратегии', sub: 'Скопируйте и отправьте другу или в Discord.', text: JSON.stringify(state.settings.custom_strategies || [], null, 2),
+    ok: 'Скопировать', readonly: true,
+    onOk: async (t) => { try { await navigator.clipboard.writeText(t); toast('Скопировано'); } catch {} },
+  });
+  $('#dev-import').onclick = () => openModal({
+    title: 'Импорт стратегий', sub: 'Вставьте экспорт своих стратегий из Proryv.', ok: 'Импортировать',
+    onOk: async (t) => {
+      let arr;
+      try { arr = JSON.parse(t); } catch { toast('Это не похоже на стратегии Proryv'); return false; }
+      if (!Array.isArray(arr) || !arr.every((c) => c && c.strategy && Array.isArray(c.strategy.steps))) { toast('Это не похоже на стратегии Proryv'); return false; }
+      let list = state.settings.custom_strategies || [];
+      for (const c of arr) list = [...list.filter((x) => x.strategy.id !== c.strategy.id), { ...c, enabled: c.enabled !== false }];
+      await devSaveCustom(list);
+      toast(`Добавлено: ${arr.length}`);
+    },
+  });
+  $('#dev-filter').addEventListener('input', renderDevLog);
+  $('#dev-pause').onclick = () => {
+    devPaused = !devPaused;
+    $('#dev-pause').textContent = devPaused ? 'Продолжить' : 'Пауза';
+    $('#dev-live').classList.toggle('off', devPaused);
+    $('#dev-live').lastChild.textContent = devPaused ? 'пауза' : 'запись';
+  };
+  $('#dev-clear').onclick = () => { devLines = []; renderDevLog(); };
+  $('#dev-copy').onclick = async () => {
+    try { await navigator.clipboard.writeText(devLines.map((x) => `${x.t} ${x.l}`).join('\n')); toast('Скопировано'); } catch {}
+  };
+  $('#dev-docs').onclick = () => call('open_link', { kind: 'zapret_docs' }).catch((e) => toast(String(e)));
+  setInterval(pollDevLog, 700);
+  renderDevList();
+}
+
 /* ---------- Поиск по настройкам ---------- */
 // Индекс собирается из самой разметки при каждом запросе — так в него попадают и пресеты, и стратегии.
 const norm = (s) => s.toLowerCase().replace(/ё/g, 'е');
@@ -756,7 +951,7 @@ async function init() {
   $('#about-ver').textContent = 'v' + boot.version;
   applyLang(boot.settings.language);
 
-  bindSettings(); bindPresets(); bindWizard(); bindWindow(); bindSearch();
+  bindSettings(); bindPresets(); bindWizard(); bindWindow(); bindSearch(); bindDev();
   renderPresets(); renderStrategies(); syncControls(); markDirty();
 
   $$('.sidebar a').forEach((a) => (a.onclick = () => showPage(a.dataset.page)));
@@ -793,7 +988,7 @@ async function init() {
   $('#tg-test').onclick = tgTest;
   $('#upd-check').onclick = () => checkUpdate(true);
   $('#upd-install').onclick = installUpdate;
-  $$('[data-discord]').forEach((b) => (b.onclick = () => call('open_discord').catch((e) => toast(String(e)))));
+  $$('[data-discord]').forEach((b) => (b.onclick = () => call('open_link', { kind: 'discord' }).catch((e) => toast(String(e)))));
   onEvent('update-progress', ([done, total]) => {
     $('#upd-banner-text').textContent = total
       ? `Скачиваем обновление… ${Math.floor((done / total) * 100)}%` : `Скачиваем обновление… ${fmtBytes(done)}`;

@@ -17,7 +17,7 @@ use crate::{
     config::Settings,
     http,
     packet::{self, TcpInfo},
-    platform::{Filter, PacketIo, PlatformError},
+    platform::{Filter, Net, PacketIo, PlatformError},
     presets,
     strategy::{self, Desync, FakeSni, SegKind, Segment, Strategy},
     tls,
@@ -49,7 +49,7 @@ pub struct RunConfig {
     pub voice_ports: Vec<(u16, u16)>,
     pub game_tcp: bool,
     pub game_udp: bool,
-    pub game_nets: Vec<(u32, u32)>,
+    pub game_nets: Vec<Net>,
 }
 
 pub const DISCORD_VOICE_PORTS: [(u16, u16); 2] = [(19294, 19344), (50000, 50100)];
@@ -109,7 +109,7 @@ impl RunConfig {
         } else {
             vec![]
         };
-        let game_nets: Vec<(u32, u32)> = s.game_ips.iter().filter_map(|c| crate::platform::parse_cidr(c)).collect();
+        let game_nets: Vec<Net> = s.game_ips.iter().filter_map(|c| crate::platform::parse_cidr(c)).collect();
         let gm = s.game_filter.as_str();
         RunConfig {
             rules,
@@ -137,12 +137,12 @@ impl RunConfig {
     }
 
     /// QUIC режем только к Google/YouTube по IPv4: UDP 443 нужен VPN-протоколам.
-    fn is_google(&self, ip: Option<u32>) -> bool {
-        ip.is_some_and(|ip| crate::platform::google_nets().iter().any(|(a, b)| ip >= *a && ip <= *b))
+    fn is_google(&self, ip: Option<u128>) -> bool {
+        ip.is_some_and(|ip| crate::platform::google_nets().iter().any(|n| n.contains(ip)))
     }
 
-    fn in_game_nets(&self, ip: Option<u32>) -> bool {
-        ip.is_some_and(|ip| self.game_nets.iter().any(|(a, b)| ip >= *a && ip <= *b))
+    fn in_game_nets(&self, ip: Option<u128>) -> bool {
+        ip.is_some_and(|ip| self.game_nets.iter().any(|n| n.contains(ip)))
     }
 
     fn rule_for(&self, host: &str) -> Option<&Rule> {
@@ -215,7 +215,7 @@ pub struct Processor {
     stats: Arc<Counters>,
     held: HeldMap,
     /// Счётчик пакетов по потокам (UDP и Game Filter TCP): (proto, v6, sport, dport, dst_ip).
-    flows: HashMap<(u8, bool, u16, u16, u32), (u32, Instant)>,
+    flows: HashMap<(u8, bool, u16, u16, u128), (u32, Instant)>,
     /// Недавние ClientHello: (v6, sport, dport, seq) — чтобы ловить повторы (самолечение).
     recent: HashMap<(bool, u16, u16, u32), Instant>,
     packets: u64,
@@ -223,7 +223,32 @@ pub struct Processor {
     pub trace: Option<Trace>,
 }
 
-pub type Trace = Arc<Mutex<Vec<String>>>;
+/// Журнал движка: последние строки и номер первой из них, чтобы читать «с места».
+#[derive(Default)]
+pub struct TraceBuf {
+    pub first: u64,
+    pub lines: std::collections::VecDeque<String>,
+}
+
+impl TraceBuf {
+    const CAP: usize = 1000;
+
+    pub fn push(&mut self, line: String) {
+        self.lines.push_back(line);
+        if self.lines.len() > Self::CAP {
+            self.lines.pop_front();
+            self.first += 1;
+        }
+    }
+
+    /// Строки начиная с номера `since` и номер, с которого читать в следующий раз.
+    pub fn since(&self, since: u64) -> (u64, Vec<String>) {
+        let skip = since.saturating_sub(self.first) as usize;
+        (self.first + self.lines.len() as u64, self.lines.iter().skip(skip).cloned().collect())
+    }
+}
+
+pub type Trace = Arc<Mutex<TraceBuf>>;
 
 fn pass(data: &[u8], addr: &[u8]) -> Outgoing {
     Outgoing { data: data.to_vec(), addr: addr.to_vec(), modified: false }
@@ -245,7 +270,7 @@ impl Processor {
         Processor { cfg, stats, held: HeldMap::default(), flows: HashMap::new(), recent: HashMap::new(), packets: 0, seed, trace: None }
     }
 
-    fn flow_index(&mut self, key: (u8, bool, u16, u16, u32), now: Instant) -> u32 {
+    fn flow_index(&mut self, key: (u8, bool, u16, u16, u128), now: Instant) -> u32 {
         let e = self.flows.entry(key).or_insert((0, now));
         if now - e.1 > Duration::from_secs(60) {
             *e = (0, now); // поток давно молчал — считаем новым
@@ -267,7 +292,7 @@ impl Processor {
     /// UDP: голос Discord и Game Filter — фейки перед первыми пакетами потока.
     fn handle_udp(&mut self, pkt: &[u8], addr: &[u8], info: packet::UdpInfo, now: Instant) -> Vec<Outgoing> {
         let payload = &pkt[info.payload_off()..];
-        let dst = packet::dst_ipv4(pkt);
+        let dst = packet::dst_ip(pkt);
         let voice = self.cfg.voice_ports.iter().any(|(a, b)| info.dst_port >= *a && info.dst_port <= *b)
             && packet::is_discord_or_stun(payload);
         let game = self.cfg.game_udp && info.dst_port >= 1024 && self.cfg.in_game_nets(dst);
@@ -298,7 +323,7 @@ impl Processor {
 
     /// Game Filter TCP: первые данные игрового соединения (не TLS/HTTP) — фейки с ts.
     fn game_tcp(&mut self, pkt: &[u8], addr: &[u8], info: &TcpInfo, now: Instant) -> Option<Vec<Outgoing>> {
-        let dst = packet::dst_ipv4(pkt);
+        let dst = packet::dst_ip(pkt);
         if !(self.cfg.game_tcp && info.dst_port >= 1024 && self.cfg.in_game_nets(dst)) {
             return None;
         }
@@ -324,10 +349,7 @@ impl Processor {
 
     fn log(&self, msg: impl FnOnce() -> String) {
         if let Some(t) = &self.trace {
-            let mut t = t.lock().unwrap();
-            if t.len() < 5000 {
-                t.push(msg());
-            }
+            t.lock().unwrap().push(msg());
         }
     }
 
@@ -340,7 +362,7 @@ impl Processor {
         let now = Instant::now();
 
         // QUIC отбрасываем: браузер через ~секунду перейдёт на TCP, где работает обход.
-        if self.cfg.block_quic && packet::is_quic(pkt) && self.cfg.is_google(packet::dst_ipv4(pkt)) {
+        if self.cfg.block_quic && packet::is_quic(pkt) && self.cfg.is_google(packet::dst_ip(pkt)) {
             self.stats.quic_blocked.fetch_add(1, Relaxed);
             return out;
         }
@@ -408,7 +430,7 @@ impl Processor {
         let rule = self.cfg.rule_for(&host)?;
         let ip_id_zero = rule.ip_id_zero;
         // Самолечение: тот же ClientHello (тот же seq) пришёл снова — значит, прошлый не прошёл.
-        {
+        let retrans = {
             let now = Instant::now();
             let rkey = (info.v6, info.src_port, info.dst_port, info.seq);
             let retrans = self.recent.get(&rkey).is_some_and(|t| now - *t < Duration::from_secs(15));
@@ -419,18 +441,23 @@ impl Processor {
             if retrans {
                 e.1 += 1;
             }
-        }
+            retrans
+        };
         self.seed = self.seed.wrapping_mul(6364136223846793005).wrapping_add(info.seq as u64 | 1);
         let plan = strategy::plan(payload, &rule.strategy, self.seed);
 
-        let sid = rule.strategy.id.clone();
         let segs = split_oversized(plan.segments);
         self.log(|| {
-            let parts: Vec<String> = segs
-                .iter()
-                .map(|s| format!("{}{}@{}", if s.kind == SegKind::Fake { "F" } else { "" }, s.data.len(), s.seq_offset as i32))
-                .collect();
-            format!("DESYNC {host} [{sid}] payload {} B -> {}", payload.len(), parts.join(" "))
+            let fakes = segs.iter().filter(|s| s.kind == SegKind::Fake).count();
+            let fail = if retrans { " · ПОВТОР — прошлый не прошёл" } else { "" };
+            let parts = segs.len() - fakes;
+            format!(
+                "{host} → {} / {} · {fakes} {} + {parts} {}{fail}",
+                rule.preset_id,
+                rule.strategy.name,
+                ru_plural(fakes, ["фейк", "фейка", "фейков"]),
+                ru_plural(parts, ["часть", "части", "частей"]),
+            )
         });
         let mut out = Vec::new();
         for seg in segs {
@@ -446,6 +473,14 @@ impl Processor {
         self.stats.desynced.fetch_add(1, Relaxed);
         *self.stats.last_host.lock().unwrap() = Some(host);
         Some(out)
+    }
+}
+
+fn ru_plural(n: usize, forms: [&'static str; 3]) -> &'static str {
+    match (n % 10, n % 100) {
+        (1, r) if r != 11 => forms[0],
+        (2..=4, r) if !(12..=14).contains(&r) => forms[1],
+        _ => forms[2],
     }
 }
 
@@ -649,6 +684,37 @@ mod tests {
     }
 
     #[test]
+    fn youtube_over_ipv6_is_desynced_and_reassembles() {
+        use crate::packet::tests::{make_v6, v6_tcp_checksum_valid};
+        let hello = tls::build_client_hello("www.youtube.com");
+        let mut p = processor();
+        let out = p.handle(&make_v6(&hello, 1000), &[0; 80]);
+        assert!(out.len() > 2 && out.iter().all(|o| o.modified));
+        assert!(out.iter().all(|o| o.data[0] >> 4 == 6 && v6_tcp_checksum_valid(&o.data)));
+        let mut real: Vec<(u32, Vec<u8>)> = out
+            .iter()
+            .filter(|o| o.data[7] != 4)
+            .map(|o| {
+                let i = packet::parse_tcp(&o.data).unwrap();
+                (i.seq, o.data[i.payload_off()..].to_vec())
+            })
+            .collect();
+        real.sort();
+        assert_eq!(real.into_iter().flat_map(|(_, d)| d).collect::<Vec<u8>>(), hello);
+    }
+
+    #[test]
+    fn long_hello_over_ipv6_is_held_then_desynced() {
+        use crate::packet::tests::make_v6;
+        let hello = tls::build_client_hello("www.youtube.com");
+        let (a, b) = hello.split_at(60);
+        let mut p = processor();
+        assert!(p.handle(&make_v6(a, 1000), &[0; 80]).is_empty());
+        let out = p.handle(&make_v6(b, 1060), &[0; 80]);
+        assert!(out.len() > 2 && out.iter().all(|o| o.modified));
+    }
+
+    #[test]
     fn alt7_layout() {
         let s = Settings {
             enabled_presets: vec!["youtube".into()],
@@ -687,6 +753,27 @@ mod tests {
         assert_eq!(p.handle(&vpn, &[0; 80]).len(), 1, "UDP 443 к VPN нельзя трогать");
         let out = p.handle(&make_v4(&tls::build_client_hello("jnn-pa.googleapis.com"), 9), &[0; 80]);
         assert!(out.iter().all(|o| o.modified && o.data[4] == 0 && o.data[5] == 0));
+    }
+
+    #[test]
+    fn quic_to_google_over_ipv6_is_dropped_vpn_is_not() {
+        use crate::packet::tests::make_udp6;
+        let s = Settings { enabled_presets: vec!["youtube".into()], ..Default::default() };
+        let mut p = Processor::new(RunConfig::from_settings(&s), Arc::new(Counters::default()));
+        let quic = make_udp6(&[0xc3; 40], "2a00:1450:4010:c0e::5d", 443);
+        assert!(p.handle(&quic, &[0; 80]).is_empty(), "QUIC к Google по IPv6 должен отбрасываться");
+        let vpn = make_udp6(&[0xc3; 40], "2a01:4f8::1", 443);
+        assert_eq!(p.handle(&vpn, &[0; 80]).len(), 1, "UDP 443 к VPN по IPv6 нельзя трогать");
+    }
+
+    #[test]
+    fn game_filter_accepts_ipv6_ranges() {
+        use crate::packet::tests::make_udp6;
+        let s = Settings { enabled_presets: vec![], game_filter: "udp".into(), game_ips: vec!["2620:2b:e000::/40".into()], ..Default::default() };
+        let mut p = Processor::new(RunConfig::from_settings(&s), Arc::new(Counters::default()));
+        let game = make_udp6(&[1; 40], "2620:2b:e0aa::7", 55000);
+        assert_eq!(p.handle(&game, &[0; 80]).len(), GAME_UDP_REPEATS + 1);
+        assert_eq!(p.handle(&make_udp6(&[1; 40], "2620:2c::1", 55000), &[0; 80]).len(), 1, "чужая сеть");
     }
 
     #[test]

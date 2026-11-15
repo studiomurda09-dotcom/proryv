@@ -127,6 +127,43 @@ pub struct Outcome {
     pub direct_ip: Option<String>,
 }
 
+/// Включить одну стратегию на время проверки и открыть адреса пресета.
+fn try_strategy(preset_id: &str, sid: &str, base: &Settings, urls: &[&str], iface: Option<&str>) -> Result<(usize, u64), String> {
+    let s = Settings {
+        enabled_presets: vec![preset_id.to_string()],
+        strategy_override: vec![(preset_id.to_string(), sid.to_string())],
+        custom_domains: base.custom_domains.clone(),
+        excluded_domains: base.excluded_domains.clone(),
+        random_fakes: base.random_fakes,
+        block_quic: base.block_quic,
+        ..Default::default()
+    };
+    let cfg = RunConfig::from_settings(&s);
+    let filter: Filter = cfg.filter();
+    let io = platform::open_default(&filter).map_err(|e| e.to_string())?;
+    let mut engine = Engine::default();
+    engine.start(cfg, io);
+    std::thread::sleep(Duration::from_millis(250));
+    let (ok, ms, _) = check_all(urls, iface);
+    engine.stop();
+    Ok((ok, ms))
+}
+
+/// Проверить одну стратегию на пресете (кнопка «Проверить» в режиме разработчика).
+/// Основной движок на время проверки должен быть остановлен.
+pub fn check_one(preset_id: &str, sid: &str, base: &Settings) -> Result<(usize, usize), String> {
+    let urls = test_urls(preset_id);
+    if urls.is_empty() {
+        return Err("для этого пресета нет адресов проверки".into());
+    }
+    #[cfg(windows)]
+    let iface = platform::windivert::direct_source_ip();
+    #[cfg(not(windows))]
+    let iface: Option<String> = None;
+    let (ok, _) = try_strategy(preset_id, sid, base, &urls, iface.as_deref())?;
+    Ok((ok, urls.len()))
+}
+
 /// Перебрать стратегии пресета и найти лучшую.
 /// Основной движок на время подбора должен быть остановлен.
 pub fn run(preset_id: &str, base: &Settings, mut on_progress: impl FnMut(&Progress)) -> Result<Outcome, String> {
@@ -155,23 +192,7 @@ pub fn run(preset_id: &str, base: &Settings, mut on_progress: impl FnMut(&Progre
     results.push(p);
 
     for (i, sid) in preset.strategies.iter().enumerate() {
-        let s = Settings {
-            enabled_presets: vec![preset_id.to_string()],
-            strategy_override: vec![(preset_id.to_string(), sid.clone())],
-            custom_domains: base.custom_domains.clone(),
-            excluded_domains: base.excluded_domains.clone(),
-            random_fakes: base.random_fakes,
-            block_quic: base.block_quic,
-            ..Default::default()
-        };
-        let cfg = RunConfig::from_settings(&s);
-        let filter: Filter = cfg.filter();
-        let io = platform::open_default(&filter).map_err(|e| e.to_string())?;
-        let mut engine = Engine::default();
-        engine.start(cfg, io);
-        std::thread::sleep(Duration::from_millis(250));
-        let (ok, ms, _) = check_all(&urls, iface.as_deref());
-        engine.stop();
+        let (ok, ms) = try_strategy(preset_id, sid, base, &urls, iface.as_deref())?;
         let p = Progress {
             preset: preset_id.into(), strategy: sid.clone(), strategy_name: names.get(sid).cloned().unwrap_or_default(),
             index: i + 1, total, ok, of: urls.len(), ms, done: false,

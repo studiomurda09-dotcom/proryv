@@ -12,7 +12,7 @@ use proryv_core::{
     autotune::{self, Diagnosis, Outcome, Progress},
     base,
     config::Settings,
-    engine::{Engine, EngineState, RunConfig, Status},
+    engine::{Engine, EngineState, RunConfig, Status, Trace},
     platform::{self, KNOWN_CONFLICTS},
     presets::{self, Preset},
     strategy::{self, Plan, Strategy},
@@ -33,6 +33,8 @@ struct AppState {
     autotune_running: AtomicBool,
     tg: Mutex<Option<proryv_tg::TgProxy>>,
     tg_error: Mutex<Option<String>>,
+    /// Журнал движка для вкладки «Разработчик» (пишется, только когда режим включён).
+    trace: Trace,
 }
 
 // ---------------------------------------------------------------- Telegram
@@ -237,7 +239,10 @@ fn start_engine_notify(app: &AppHandle) -> Status {
 
 fn start_engine(state: &AppState) -> Status {
     let mut engine = state.engine.lock().unwrap();
-    let cfg = RunConfig::from_settings(&state.settings.lock().unwrap());
+    let settings = state.settings.lock().unwrap();
+    engine.trace = settings.dev_mode.then(|| state.trace.clone());
+    let cfg = RunConfig::from_settings(&settings);
+    drop(settings);
     match platform::open_default(&cfg.filter()) {
         Ok(io) => engine.start(cfg, io),
         Err(e) => engine.fail(e.to_string()),
@@ -279,6 +284,7 @@ fn save_settings(state: State<AppState>, mut settings: Settings) -> Result<(), S
     }
     settings.save(&state.settings_path).map_err(|e| e.to_string())?;
     let autostart = settings.autostart;
+    base::set_custom(&settings.custom_strategies);
     *state.settings.lock().unwrap() = settings;
     if autostart != old_autostart {
         set_autostart(autostart)?;
@@ -555,6 +561,48 @@ fn set_backdrop(window: tauri::WebviewWindow, backdrop: String) {
     apply_backdrop(&window, &backdrop);
 }
 
+// ---------------------------------------------------------------- режим разработчика
+
+#[tauri::command]
+fn zapret_parse(text: String) -> Result<Vec<proryv_core::zapret::Parsed>, String> {
+    proryv_core::zapret::parse(&text)
+}
+
+#[tauri::command]
+fn preview_strategy(host: String, strategy: Strategy) -> Plan {
+    let host = if host.trim().is_empty() { "www.youtube.com".to_string() } else { host.trim().to_string() };
+    strategy::plan(&tls::build_client_hello(&host), &strategy, 0x9e37_79b9)
+}
+
+/// Строки журнала начиная с `since` и номер для следующего запроса.
+#[tauri::command]
+fn dev_log(state: State<AppState>, since: u64) -> (u64, Vec<String>) {
+    state.trace.lock().unwrap().since(since)
+}
+
+/// Проверить стратегию (даже ещё не сохранённую) на адресах пресета, мимо VPN.
+#[tauri::command(async)]
+fn dev_check(state: State<AppState>, preset: String, strategy: Strategy) -> Result<(usize, usize), String> {
+    base::check_strategy(&strategy)?;
+    if state.autotune_running.swap(true, Ordering::SeqCst) {
+        return Err("Подбор уже идёт".into());
+    }
+    let settings = state.settings.lock().unwrap().clone();
+    let mut custom = settings.custom_strategies.clone();
+    custom.retain(|c| c.strategy.id != strategy.id);
+    custom.push(proryv_core::config::CustomStrategy { strategy: strategy.clone(), zapret: String::new(), enabled: true, result: None });
+    base::set_custom(&custom);
+    let was_running = is_running(&state);
+    stop_engine(&state);
+    let res = autotune::check_one(&preset, &strategy.id, &settings);
+    base::set_custom(&settings.custom_strategies);
+    if was_running {
+        start_engine(&state);
+    }
+    state.autotune_running.store(false, Ordering::SeqCst);
+    res
+}
+
 // ---------------------------------------------------------------- база и провайдер
 
 #[derive(Serialize, Clone)]
@@ -588,11 +636,15 @@ fn open_github(path: String) -> Result<(), String> {
     Ok(())
 }
 
-const DISCORD_URL: &str = "https://discord.gg/SzRm7GNyU9";
-
+/// Внешние ссылки, которые интерфейс может открыть: только из этого списка.
 #[tauri::command]
-fn open_discord() -> Result<(), String> {
-    hidden_cmd("explorer").arg(DISCORD_URL).status().map_err(|e| e.to_string())?;
+fn open_link(kind: String) -> Result<(), String> {
+    let url = match kind.as_str() {
+        "discord" => "https://discord.gg/SzRm7GNyU9",
+        "zapret_docs" => "https://github.com/bol-van/zapret/blob/master/docs/readme.md",
+        _ => return Err("неизвестная ссылка".into()),
+    };
+    hidden_cmd("explorer").arg(url).status().map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -730,6 +782,7 @@ pub fn run() {
                 }
             }
             let enable_now = settings.enable_on_launch;
+            base::set_custom(&settings.custom_strategies);
             app.manage(AppState {
                 engine: Mutex::new(Engine::default()),
                 settings: Mutex::new(settings),
@@ -737,6 +790,7 @@ pub fn run() {
                 autotune_running: AtomicBool::new(false),
                 tg: Mutex::new(None),
                 tg_error: Mutex::new(None),
+                trace: Trace::default(),
             });
             sync_tg(&app.state::<AppState>());
             spawn_base_loader(app.handle().clone(), app.path().app_config_dir()?.join("base.json"));
@@ -779,7 +833,11 @@ pub fn run() {
             install_update,
             isp_info,
             open_github,
-            open_discord
+            open_link,
+            zapret_parse,
+            preview_strategy,
+            dev_log,
+            dev_check
         ])
         .run(tauri::generate_context!())
         .expect("не удалось запустить Proryv");

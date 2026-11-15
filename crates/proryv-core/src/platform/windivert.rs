@@ -73,8 +73,7 @@ pub fn filter_string(f: &Filter) -> String {
         parts.push(format!("(udp and ({r}))"));
     }
     if (f.game_tcp || f.game_udp) && !f.game_nets.is_empty() {
-        let ip = |v: u32| std::net::Ipv4Addr::from(v).to_string();
-        let nets = f.game_nets.iter().map(|(a, b)| format!("(ip.DstAddr >= {} and ip.DstAddr <= {})", ip(*a), ip(*b))).collect::<Vec<_>>().join(" or ");
+        let nets = super::nets_condition(&f.game_nets);
         if f.game_tcp {
             parts.push(format!("(tcp and tcp.DstPort >= 1024 and tcp.PayloadLength > 0 and ({nets}))"));
         }
@@ -271,6 +270,32 @@ mod tests {
         assert!(f.contains("(udp.DstPort >= 50000 and udp.DstPort <= 50100)"));
         assert!(f.contains("ip.DstAddr >= 128.116.0.0 and ip.DstAddr <= 128.116.127.255"));
         assert!(!f.contains("tcp.DstPort >= 1024"));
+    }
+
+    /// Строку фильтра проверяет сам WinDivert (WinDivertHelperCompileFilter):
+    /// драйвер и права администратора для этого не нужны.
+    #[test]
+    fn filter_with_ipv6_nets_compiles_in_windivert() {
+        type CompileFn = unsafe extern "C" fn(*const i8, u32, *mut u8, u32, *mut *const i8, *mut u32) -> i32;
+        let dll = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../third_party/windivert/WinDivert.dll");
+        let lib = unsafe { Library::new(&dll) }.expect("WinDivert.dll из third_party");
+        let compile: CompileFn = unsafe { *lib.get(b"WinDivertHelperCompileFilter\0").unwrap() };
+        let f = Filter {
+            tcp_ports: vec![443, 80],
+            block_quic: true,
+            udp_ranges: vec![(19294, 19344)],
+            game_tcp: true,
+            game_udp: true,
+            game_nets: vec![crate::platform::parse_cidr("128.116.0.0/17").unwrap(), crate::platform::parse_cidr("2620:2b:e000::/40").unwrap()],
+            exclude_ifs: vec![17],
+        };
+        let s = CString::new(filter_string(&f)).unwrap();
+        let (mut err, mut pos) = (std::ptr::null(), 0u32);
+        let ok = unsafe { compile(s.as_ptr(), LAYER_NETWORK, std::ptr::null_mut(), 0, &mut err, &mut pos) };
+        let msg = if err.is_null() { String::new() } else { unsafe { std::ffi::CStr::from_ptr(err) }.to_string_lossy().into_owned() };
+        assert!(ok != 0, "WinDivert не принял фильтр: {msg} (позиция {pos})\n{}", filter_string(&f));
+        let bad = CString::new("outbound and ipv6.DstAddr >= 2a00::zz").unwrap();
+        assert_eq!(unsafe { compile(bad.as_ptr(), LAYER_NETWORK, std::ptr::null_mut(), 0, &mut err, &mut pos) }, 0, "сломанный фильтр должен отклоняться");
     }
 
     #[test]

@@ -135,8 +135,15 @@ pub fn parse_udp(p: &[u8]) -> Option<UdpInfo> {
     Some(UdpInfo { v6, ip_hdr_len: ihl, src_port: be16(p, ihl), dst_port: be16(p, ihl + 2) })
 }
 
-pub fn dst_ipv4(p: &[u8]) -> Option<u32> {
-    (p.first()? >> 4 == 4 && p.len() >= 20).then(|| u32::from_be_bytes([p[16], p[17], p[18], p[19]]))
+/// Адрес назначения IPv4 или IPv6 как одно число (см. `platform::ip_key`).
+pub fn dst_ip(p: &[u8]) -> Option<u128> {
+    use std::net::IpAddr;
+    let ip: IpAddr = match p.first()? >> 4 {
+        4 if p.len() >= 20 => <[u8; 4]>::try_from(&p[16..20]).ok()?.into(),
+        6 if p.len() >= 40 => <[u8; 16]>::try_from(&p[24..40]).ok()?.into(),
+        _ => return None,
+    };
+    Some(crate::platform::ip_key(ip))
 }
 
 pub fn build_udp(orig: &[u8], info: &UdpInfo, payload: &[u8]) -> Vec<u8> {
@@ -291,6 +298,50 @@ pub(crate) mod tests {
         p
     }
 
+    /// IPv6/TCP пакет: 2a00:1:2::10 → 2a00:1450:4010:c0e::5d (YouTube), порт 50000 → 443.
+    pub fn make_v6(payload: &[u8], seq: u32) -> Vec<u8> {
+        let mut p = vec![0x60, 0, 0, 0, 0, 0, 6, 64];
+        p.extend_from_slice(&[0x2a, 0x00, 0, 1, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10]);
+        p.extend_from_slice(&[0x2a, 0x00, 0x14, 0x50, 0x40, 0x10, 0x0c, 0x0e, 0, 0, 0, 0, 0, 0, 0, 0x5d]);
+        p.extend_from_slice(&[0xc3, 0x50, 0x01, 0xbb, 0, 0, 0, 0, 0, 0, 0, 1, 0x50, 0x18, 0xff, 0xff, 0, 0, 0, 0]);
+        p[44..48].copy_from_slice(&seq.to_be_bytes());
+        p.extend_from_slice(payload);
+        let len = (p.len() - 40) as u16;
+        p[4..6].copy_from_slice(&len.to_be_bytes());
+        let info = parse_tcp(&p).unwrap();
+        fix_checksums(&mut p, &info);
+        p
+    }
+
+    /// Сумма TCP по RFC 8200 §8.1, посчитанная заново, без fix_checksums.
+    pub fn v6_tcp_checksum_valid(p: &[u8]) -> bool {
+        let tcp = &p[40..];
+        let mut words: Vec<u32> = p[8..40].chunks(2).map(|c| u16::from_be_bytes([c[0], c[1]]) as u32).collect();
+        words.extend([(tcp.len() as u32) >> 16, tcp.len() as u32 & 0xffff, 6]);
+        words.extend(tcp.chunks(2).map(|c| u16::from_be_bytes([c[0], *c.get(1).unwrap_or(&0)]) as u32));
+        let mut s: u32 = words.iter().sum();
+        while s >> 16 != 0 {
+            s = (s & 0xffff) + (s >> 16);
+        }
+        s == 0xffff
+    }
+
+    #[test]
+    fn v6_packet_parses_and_segments_have_valid_checksums() {
+        let p = make_v6(b"hello", 1000);
+        let i = parse_tcp(&p).unwrap();
+        assert!(i.v6);
+        assert_eq!((i.dst_port, i.seq, i.payload_off()), (443, 1000, 60));
+        assert!(v6_tcp_checksum_valid(&p));
+        assert_eq!(dst_ip(&p), Some(crate::platform::ip_key("2a00:1450:4010:c0e::5d".parse().unwrap())));
+        let seg = Segment { kind: SegKind::Fake, seq_offset: 3, data: b"fake!".to_vec(), ttl: Some(4), fooling: vec![Fooling::Ttl], label: String::new() };
+        let out = build_segment(&p, &i, &seg);
+        assert!(v6_tcp_checksum_valid(&out));
+        assert_eq!(out[7], 4, "hop limit = TTL фейка");
+        assert_eq!(u16::from_be_bytes([out[4], out[5]]) as usize, out.len() - 40);
+        assert_eq!(parse_tcp(&out).unwrap().seq, 1003);
+    }
+
     fn checksum_ok(p: &[u8]) -> bool {
         let info = parse_tcp(p).unwrap();
         let mut q = p.to_vec();
@@ -370,6 +421,18 @@ pub(crate) mod tests {
         build_udp(&p, &info, payload)
     }
 
+    pub fn make_udp6(payload: &[u8], dst: &str, dport: u16) -> Vec<u8> {
+        let dst: std::net::Ipv6Addr = dst.parse().unwrap();
+        let mut p = vec![0x60, 0, 0, 0, 0, 0, 17, 64];
+        p.extend_from_slice(&[0x2a, 0x00, 0, 1, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10]);
+        p.extend_from_slice(&dst.octets());
+        p.extend_from_slice(&[0xc3, 0x50]);
+        p.extend_from_slice(&dport.to_be_bytes());
+        p.extend_from_slice(&[0, 0, 0, 0]);
+        let info = UdpInfo { v6: true, ip_hdr_len: 40, src_port: 50000, dst_port: dport };
+        build_udp(&p, &info, payload)
+    }
+
     #[test]
     fn udp_build_and_checksum() {
         let p = make_udp4(b"hello", [8, 8, 8, 8], 50010);
@@ -379,7 +442,7 @@ pub(crate) mod tests {
         // Проверка суммы: пересчёт по пакету с полем суммы даёт 0.
         let acc = sum16(&p[12..20], 0) + 17 + 13;
         assert_eq!(fold(sum16(&p[20..], acc)), 0);
-        assert_eq!(dst_ipv4(&p), Some(0x0808_0808));
+        assert_eq!(dst_ip(&p), Some(crate::platform::ip_key("8.8.8.8".parse().unwrap())));
     }
 
     #[test]

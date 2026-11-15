@@ -52,7 +52,7 @@ const I18N_EN = {
   'Обход для игр: фейки перед первыми пакетами соединения к игровым серверам (порты 1024–65535). Как одноимённый режим в zapret.':
     'Bypass for games: fakes before the first packets to game servers (ports 1024–65535). Same as the zapret mode.',
   'Только UDP': 'UDP only', 'Только TCP': 'TCP only', 'TCP и UDP': 'TCP and UDP',
-  'Игровые серверы (диапазоны IP)': 'Game servers (IP ranges)', 'По одному на строку, формат': 'One per line, format',
+  'Игровые серверы (диапазоны IP)': 'Game servers (IP ranges)', 'По одному на строку, формат': 'One per line, format', 'или': 'or',
   '. По умолчанию — серверы Roblox. Game Filter действует только на эти адреса, чтобы не трогать остальной трафик.':
     '. Roblox servers by default. Game Filter only touches these addresses and leaves other traffic alone.',
   'Включите и нажмите «Сохранить», чтобы запустить прокси.': 'Turn it on and press “Save” to start the proxy.',
@@ -149,6 +149,36 @@ const I18N_EN = {
   'Импортировано — нажмите «Сохранить»': 'Imported — press “Save”', 'Настройки сохранены': 'Settings saved', 'Настройки сброшены — нажмите «Сохранить»': 'Settings reset — press “Save”',
   'Выберите хотя бы один пресет': 'Select at least one preset', 'В браузере окно не закрыть': 'The window cannot be closed in a browser',
 
+  // Разработчик
+  'Разработчик': 'Developer', 'Режим разработчика': 'Developer mode',
+  'Вкладка «Разработчик»: стратегии в синтаксисе zapret, свои альты в автоподборе и живой лог движка.': 'The “Developer” tab: strategies in zapret syntax, your own strategies in auto-tune and a live engine log.',
+  'Стратегии в синтаксисе zapret, свои альты в автоподборе и живой лог движка.': 'Strategies in zapret syntax, your own strategies in auto-tune and a live engine log.',
+  'Стратегия из zapret': 'Strategy from zapret', 'Открыть .bat': 'Open .bat',
+  'Вставьте параметры winws или блок из .bat — Proryv переведёт их в свою стратегию.': 'Paste winws parameters or a block from a .bat — Proryv will turn them into its own strategy.',
+  'Сохранить как свою': 'Save as mine', 'Свои стратегии': 'My strategies', 'Экспорт': 'Export', 'Импорт': 'Import',
+  'Участвуют в автоподборе вместе со встроенными и выбираются в пресетах.': 'They take part in auto-tune next to the built-in ones and can be picked in presets.',
+  'Живой лог': 'Live log', 'запись': 'recording', 'пауза': 'paused', 'Пауза': 'Pause', 'Продолжить': 'Resume', 'Очистить': 'Clear',
+  'Фильтр: сайт или стратегия': 'Filter: site or strategy',
+  'Включите обход и откройте сайт — здесь появятся строки.': 'Turn the bypass on and open a site — lines will appear here.',
+  'Откройте сайт — здесь появятся строки.': 'Open a site — lines will appear here.',
+  'Шпаргалка по параметрам': 'Parameter cheat sheet', 'Полная документация bol-van ↗': 'Full bol-van documentation ↗',
+  'fake, multisplit, multidisorder, split, disorder — режимы через запятую': 'fake, multisplit, multidisorder, split, disorder — modes, comma-separated',
+  'где резать: 1, host, endhost, midsld, sniext+1 (и midhost — только в Proryv)': 'where to cut: 1, host, endhost, midsld, sniext+1 (and midhost — Proryv only)',
+  'наложение: сколько байт фейка подложить перед данными': 'overlap: how many fake bytes to put before the data',
+  'файл tls_clienthello_САЙТ.bin — к какому сайту фейк наложения': 'tls_clienthello_SITE.bin — which site the overlap fake is for',
+  'как обмануть сервер: ts, badseq, badsum, md5sig': 'how to fool the server: ts, badseq, badsum, md5sig',
+  'малый TTL фейка: пакет умрёт по дороге после DPI': 'low fake TTL: the packet dies on the way after the DPI',
+  'сколько раз отправить фейк': 'how many times to send the fake',
+  'файл tls_clienthello_САЙТ.bin — какой сайт в фейке': 'tls_clienthello_SITE.bin — which site is in the fake',
+  'не проверялась': 'not checked', 'Удалить': 'Delete', 'соединений': 'connections', '· обработано': '· processed', '· фейков': '· fakes',
+  'Скопируйте и отправьте другу или в Discord.': 'Copy it and send it to a friend or to Discord.',
+  'Импорт стратегий': 'Import strategies', 'Вставьте экспорт своих стратегий из Proryv.': 'Paste an export of your Proryv strategies.',
+  'Это не похоже на стратегии Proryv': 'This does not look like Proryv strategies',
+  'фейк: случайный сайт': 'fake: random site', 'Не нашёл ни одного TCP-блока с --dpi-desync': 'No TCP block with --dpi-desync found',
+  'у фейка нет fooling и ttl — он может дойти до сервера и сломать соединение': 'the fake has no fooling or ttl — it may reach the server and break the connection',
+  '--ip-id задаётся пресетом (у YouTube уже zero) — пропущен': '--ip-id is set by the preset (YouTube already uses zero) — skipped',
+  'Прочие': 'Other',
+
   // О программе
   'Обход DPI-блокировок с автоподбором стратегий под вашего провайдера. Написано на Rust.': 'DPI bypass with automatic strategy tuning for your provider. Written in Rust.',
   'Обновления': 'Updates', 'Новые версии ставятся прямо из программы, без скачивания вручную.': 'New versions install right from the app, no manual download.',
@@ -199,6 +229,13 @@ const I18N_RX = [
   [/^Ошибка перехвата: (.+)$/, 'Capture error: $1'],
   [/^Не удалось настроить автозапуск: (.*)$/, 'Could not set up autostart: $1'],
   [/^(.+) · AS(\d+)$/, '$1 · AS$2'],
+  [/^(.*) · (\d+) фейк\S* \+ (\d+) част\S*( · ПОВТОР — прошлый не прошёл)?$/, (m, a, f, p, r) => `${a.replace(/ \/ (.+)$/, (x, n) => ' / ' + trWord(n))} · ${f} fakes + ${p} parts` + (r ? ' · RETRY — the previous one failed' : '')],
+  [/^(--[\w-]+) пока не поддерживается — пропущен$/, '$1 is not supported yet — skipped'],
+  [/^режим (\S+) пока не поддерживается — пропущен$/, 'mode $1 is not supported yet — skipped'],
+  [/^fooling=(\S+) не поддерживается — пропущен$/, 'fooling=$1 is not supported — skipped'],
+  [/^позиция «(.+)» не поддерживается — пропущена$/, 'position «$1» is not supported — skipped'],
+  [/^Добавлено: (\d+)$/, 'Added: $1'],
+  [/^(YouTube|Discord|Прочие) (\d+)\/(\d+)$/, (m, p, a, b) => `${trWord(p)} ${a}/${b}`],
 ];
 
 const trWord = (s) => I18N_EN[s] || s;

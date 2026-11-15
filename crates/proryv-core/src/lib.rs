@@ -18,6 +18,7 @@ pub mod presets;
 pub mod quic;
 pub mod strategy;
 pub mod tls;
+pub mod zapret;
 
 pub const APP_NAME: &str = "Proryv";
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");

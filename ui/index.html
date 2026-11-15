@@ -100,6 +100,7 @@
       <hr />
       <a data-page="appearance" data-icon="palette">Внешний вид</a>
       <a data-page="general" data-icon="settings">Общие настройки</a>
+      <a data-page="dev" data-icon="code" class="hidden" id="nav-dev">Разработчик <span class="badge">DEV</span></a>
       <div class="grow"></div>
       <a data-page="about" data-icon="info">О программе</a>
     </nav>
@@ -170,7 +171,7 @@
             </select></div>
           <div class="card">
             <b>Игровые серверы (диапазоны IP)</b>
-            <small>По одному на строку, формат <span class="mono">128.116.0.0/17</span>. По умолчанию — серверы Roblox. Game Filter действует только на эти адреса, чтобы не трогать остальной трафик.</small>
+            <small>По одному на строку, формат <span class="mono">128.116.0.0/17</span> или <span class="mono">2620:2b::/40</span>. По умолчанию — серверы Roblox. Game Filter действует только на эти адреса, чтобы не трогать остальной трафик.</small>
             <textarea data-setting-list="game_ips" rows="4" style="margin-top:10px" placeholder="128.116.0.0/17"></textarea>
           </div>
         </div>
@@ -271,7 +272,68 @@
           <div class="card row" data-keywords="база домены стратегии провайдер github"><div><b>Обновлять базу стратегий</b><small>Списки доменов, стратегии и база провайдеров скачиваются с GitHub при запуске — без новой версии программы.</small></div><label class="toggle"><input type="checkbox" data-setting="update_base"><i></i></label></div>
           <div class="card row"><div><b>Проверять обновления</b><small>При запуске смотреть, нет ли новой версии на GitHub, и предлагать обновиться в один клик.</small></div><label class="toggle"><input type="checkbox" data-setting="check_updates"><i></i></label></div>
           <div class="card row"><div><b>Уведомления</b><small>Уведомление Windows, когда самолечение сменило стратегию или обход не смог включиться.</small></div><label class="toggle"><input type="checkbox" data-setting="notifications"><i></i></label></div>
+          <div class="card row" data-keywords="разработчик dev zapret winws альты лог"><div><b>Режим разработчика</b><small>Вкладка «Разработчик»: стратегии в синтаксисе zapret, свои альты в автоподборе и живой лог движка.</small></div><label class="toggle"><input type="checkbox" data-setting="dev_mode"><i></i></label></div>
           <div class="card row"><div><b>Показать мастер настройки снова</b></div><button class="btn" id="act-wizard">Открыть</button></div>
+        </div>
+      </section>
+
+      <!-- Разработчик -->
+      <section class="page" data-page="dev">
+        <h1>Разработчик</h1>
+        <p class="sub">Стратегии в синтаксисе zapret, свои альты в автоподборе и живой лог движка.</p>
+        <div class="cards">
+          <div class="card" data-keywords="zapret winws bat импорт альта">
+            <div class="head2"><b>Стратегия из zapret</b><span class="tag">winws</span><div class="grow"></div>
+              <button class="btn mini" id="dev-bat"><span data-icon="upload"></span> Открыть .bat</button>
+              <input type="file" id="dev-file" accept=".bat,.cmd,.txt" hidden></div>
+            <small>Вставьте параметры winws или блок из .bat — Proryv переведёт их в свою стратегию.</small>
+            <textarea class="z-input" id="dev-z" rows="3" spellcheck="false" placeholder="--dpi-desync=fake,multisplit --dpi-desync-split-pos=1 --dpi-desync-split-seqovl=681 --dpi-desync-fooling=ts --dpi-desync-repeats=8"></textarea>
+            <div id="dev-parsed" class="hidden">
+              <select id="dev-block" class="hidden"></select>
+              <div class="chips2" id="dev-chips"></div>
+              <div class="warnline" id="dev-warn"></div>
+              <div class="seg-bar" id="dev-bar"></div>
+              <div class="row-actions">
+                <input id="dev-name" spellcheck="false" />
+                <button class="btn accent" id="dev-save">Сохранить как свою</button>
+                <select id="dev-preset"><option value="youtube">YouTube</option><option value="discord">Discord</option><option value="general">Прочие заблокированные</option></select>
+                <button class="btn" id="dev-check">Проверить</button>
+                <span class="dev-result" id="dev-result"></span>
+              </div>
+            </div>
+            <div class="warnline err hidden" id="dev-err"></div>
+          </div>
+
+          <div class="card">
+            <div class="head2"><b>Свои стратегии</b><span class="tag" id="dev-count">0</span><div class="grow"></div>
+              <button class="btn mini" id="dev-export">Экспорт</button><button class="btn mini" id="dev-import">Импорт</button></div>
+            <small>Участвуют в автоподборе вместе со встроенными и выбираются в пресетах.</small>
+          </div>
+          <div class="cards" id="dev-list"></div>
+
+          <div class="card">
+            <div class="head2"><b>Живой лог</b><span class="live" id="dev-live"><i></i>запись</span><div class="grow"></div>
+              <span class="stat2" id="dev-stats"></span></div>
+            <div class="logbar">
+              <input id="dev-filter" placeholder="Фильтр: сайт или стратегия" spellcheck="false" />
+              <button class="btn mini" id="dev-pause">Пауза</button><button class="btn mini" id="dev-clear">Очистить</button><button class="btn mini" id="dev-copy">Скопировать</button>
+            </div>
+            <div class="log" id="dev-log"><div class="t">Включите обход и откройте сайт — здесь появятся строки.</div></div>
+          </div>
+
+          <div class="card">
+            <div class="head2"><b>Шпаргалка по параметрам</b><div class="grow"></div><button class="btn mini" id="dev-docs">Полная документация bol-van ↗</button></div>
+            <div class="cheat">
+              <code>--dpi-desync=</code><span>fake, multisplit, multidisorder, split, disorder — режимы через запятую</span>
+              <code>--dpi-desync-split-pos=</code><span>где резать: 1, host, endhost, midsld, sniext+1 (и midhost — только в Proryv)</span>
+              <code>--dpi-desync-split-seqovl=</code><span>наложение: сколько байт фейка подложить перед данными</span>
+              <code>--dpi-desync-split-seqovl-pattern=</code><span>файл tls_clienthello_САЙТ.bin — к какому сайту фейк наложения</span>
+              <code>--dpi-desync-fooling=</code><span>как обмануть сервер: ts, badseq, badsum, md5sig</span>
+              <code>--dpi-desync-ttl=</code><span>малый TTL фейка: пакет умрёт по дороге после DPI</span>
+              <code>--dpi-desync-repeats=</code><span>сколько раз отправить фейк</span>
+              <code>--dpi-desync-fake-tls=</code><span>файл tls_clienthello_САЙТ.bin — какой сайт в фейке</span>
+            </div>
+          </div>
         </div>
       </section>
 
