@@ -597,6 +597,15 @@ fn open_github(path: String) -> Result<(), String> {
     Ok(())
 }
 
+const DISCORD_URL: &str = "https://discord.gg/SzRm7GNyU9";
+
+/// Открыть Discord-сервер проекта в браузере.
+#[tauri::command]
+fn open_discord() -> Result<(), String> {
+    hidden_cmd("explorer").arg(DISCORD_URL).status().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// При запуске: база из кэша сразу, потом свежая с GitHub и провайдер.
 fn spawn_base_loader(app: AppHandle, cache: PathBuf) {
     if let Some(b) = std::fs::read_to_string(&cache).ok().and_then(|s| serde_json::from_str(&s).ok()) {
@@ -780,7 +789,8 @@ pub fn run() {
             check_update,
             install_update,
             isp_info,
-            open_github
+            open_github,
+            open_discord
         ])
         .run(tauri::generate_context!())
         .expect("не удалось запустить Proryv");

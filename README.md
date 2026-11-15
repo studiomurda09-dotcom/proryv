@@ -3,7 +3,7 @@
 **Обход блокировок YouTube, Discord (с голосом) и Telegram — без VPN, с нормальным интерфейсом.**
 Proryv сам подбирает способ обхода под вашего провайдера и чинит его, когда провайдер что-то меняет.
 
-[**⬇ Скачать для Windows**](https://github.com/studiomurda09-dotcom/proryv/releases/latest) · [English](#english)
+[**⬇ Скачать для Windows**](https://github.com/studiomurda09-dotcom/proryv/releases/latest) · [**💬 Discord-сервер**](https://discord.gg/SzRm7GNyU9) · [English](#english)
 
 ![Главная](docs/screenshots/ru-home.png)
 
@@ -33,6 +33,8 @@ Proryv сам подбирает способ обхода под вашего �
 4. Пройдите мастер, затем «Автоподбор» → «Подобрать» и большая кнопка на главной.
 
 Не запускайте одновременно zapret, GoodbyeDPI или другой обход: они будут мешать друг другу.
+
+Что-то не открывается? Напишите в [Discord](https://discord.gg/SzRm7GNyU9): название провайдера и какой сайт не работает — подскажем стратегию.
 
 **Telegram:** «Пресеты» → «Дополнительно» → Telegram → включить → «Сохранить» → «Подключить Telegram». Без VPN работают аккаунты на дата-центрах DC2/DC4 (большинство в России). DC1/3/5 заблокированы по IP, и DPI-обход тут бессилен.
 
@@ -85,7 +87,7 @@ Proryv finds a DPI bypass strategy for your internet provider by itself and repa
 - **Provider database:** detects your provider and uses the strategy that worked for other users of the same provider.
 - **Discord voice, Telegram proxy, Game Filter** (TCP/UDP), VPN-safe, one-click updates, settings search, Russian and English UI.
 
-**Install:** download the [latest release](https://github.com/studiomurda09-dotcom/proryv/releases/latest), run the installer and allow administrator rights. If Windows Defender warns about the WinDivert packet driver, choose “More info” → “Run anyway”. Then go to Auto-tune → Find and press the big button on Home.
+**Install:** download the [latest release](https://github.com/studiomurda09-dotcom/proryv/releases/latest), run the installer and allow administrator rights. If Windows Defender warns about the WinDivert packet driver, choose “More info” → “Run anyway”. Then go to Auto-tune → Find and press the big button on Home. Questions: [Discord](https://discord.gg/SzRm7GNyU9).
 
 | Presets | Auto-tune |
 |---|---|

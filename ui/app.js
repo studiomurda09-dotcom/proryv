@@ -89,6 +89,7 @@ const mockBackend = (() => {
     check_update: () => null,
     isp_info: () => ({ isp: { asn: 64512, name: 'Example Telecom' }, entry: { asn: 64512, name: 'Example Telecom', strategies: { youtube: 'alt11' } }, base_version: 1, done: true }),
     open_github: () => null,
+    open_discord: () => { window.open('https://discord.gg/SzRm7GNyU9'); return null; },
     install_update: () => { throw 'в браузере обновление недоступно'; },
     tg_test: () => [[2, { Ok: 340 }], [4, { Ok: 370 }], [1, { Err: 'заблокирован по IP' }]],
     diagnose: ({ host }) => ({ host, ips: ['142.251.150.4'], verdict: 'dpi', direct_path: true,
@@ -795,6 +796,7 @@ async function init() {
   $('#tg-test').onclick = tgTest;
   $('#upd-check').onclick = () => checkUpdate(true);
   $('#upd-install').onclick = installUpdate;
+  $$('[data-discord]').forEach((b) => (b.onclick = () => call('open_discord').catch((e) => toast(String(e)))));
   onEvent('update-progress', ([done, total]) => {
     $('#upd-banner-text').textContent = total
       ? `Скачиваем обновление… ${Math.floor((done / total) * 100)}%` : `Скачиваем обновление… ${fmtBytes(done)}`;

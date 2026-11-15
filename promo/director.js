@@ -14,7 +14,7 @@ const clamp = (v, a, b) => Math.min(Math.max(v, a), b);
 const CUES = [];
 let T0 = performance.now();
 const now = () => (performance.now() - T0) / 1000;
-function cue(id, what, sound) { CUES.push({ t: +now().toFixed(3), id, what, sound }); }
+function cue(id, what, sound) { CUES.push({ t: +now().toFixed(3), id, what, sound }); SFX.play(id); }
 
 /* ---------- Приложение внутри рамки ---------- */
 const doc = () => frame.contentDocument;
@@ -74,6 +74,7 @@ async function typeText(input, text, what) {
   cue('typing_start', `${what}: начало набора «${text}» (${text.length} клавиш)`, 'Клавиатура: серия нажатий, ~9 в секунду');
   for (const ch of text) {
     input.value += ch;
+    SFX.key();
     input.dispatchEvent(new Event('input', { bubbles: true }));
     await sleep(95 + Math.random() * 40);
   }
@@ -93,11 +94,13 @@ async function captionOff() { $('#caption').classList.remove('on'); cue('caption
 /* ---------- Запись вкладки ---------- */
 let rec = null, chunks = [], mime = '';
 async function startRecording() {
-  const stream = await navigator.mediaDevices.getDisplayMedia({
+  const screen = await navigator.mediaDevices.getDisplayMedia({
     video: { frameRate: 60, width: W, height: H }, audio: false, preferCurrentTab: true,
   });
-  mime = ['video/mp4;codecs=avc1.640028', 'video/mp4', 'video/webm;codecs=vp9'].find((m) => MediaRecorder.isTypeSupported(m));
-  rec = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 12_000_000 });
+  // Видео вкладки + звуки из синтезатора — одной записью, синхронно.
+  const stream = new MediaStream([...screen.getVideoTracks(), ...SFX.stream.getAudioTracks()]);
+  mime = ['video/mp4;codecs=avc1.640028,mp4a.40.2', 'video/mp4', 'video/webm;codecs=vp9,opus'].find((m) => MediaRecorder.isTypeSupported(m));
+  rec = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 12_000_000, audioBitsPerSecond: 192_000 });
   rec.ondataavailable = (e) => e.data.size && chunks.push(e.data);
   const started = new Promise((r) => (rec.onstart = r));
   rec.start(1000);
@@ -126,6 +129,7 @@ async function play() {
   setCam(1.12, (W - AW * 1.12) / 2, (H - AH * 1.12) / 2 + 140, 0);
   await sleep(300);
 
+  await SFX.init();
   if (new URLSearchParams(location.search).get('rec') === '1') await startRecording();
   T0 = performance.now();
 
@@ -245,7 +249,7 @@ async function play() {
   cue('window_out', 'Окно отъезжает и растворяется', 'Обратный свуш');
   await sleep(700);
   $('#outro').classList.add('on');
-  cue('outro', 'Финальный экран: логотип, «Бесплатно · Открытый код», ссылка', 'Финальный удар + хвост (риверб), можно с лого-звуком');
+  cue('outro', 'Финальный экран: логотип, «Бесплатно · Открытый код», ссылки на GitHub и Discord', 'Финальный удар + хвост (риверб), можно с лого-звуком');
   await sleep(4200);
   cue('end', 'Конец ролика', '—');
 

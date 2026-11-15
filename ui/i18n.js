@@ -153,7 +153,10 @@ const I18N_EN = {
   // О программе
   'Обход DPI-блокировок с автоподбором стратегий под вашего провайдера. Написано на Rust.': 'DPI bypass with automatic strategy tuning for your provider. Written in Rust.',
   'Обновления': 'Updates', 'Новые версии ставятся прямо из программы, без скачивания вручную.': 'New versions install right from the app, no manual download.',
-  'Лицензия': 'License', 'Движок': 'Engine', 'Перехват пакетов': 'Packet capture',
+  'Лицензия': 'License', 'Discord-сервер': 'Discord server', 'Discord': 'Discord',
+  'Новости, помощь и стратегии от других пользователей.': 'News, help and strategies from other users.',
+  'Не помогло?': 'Didn’t help?',
+  'Напишите в Discord: название провайдера и что не открывается — подскажем стратегию.': 'Write to us on Discord: your provider and what does not open — we will suggest a strategy.', 'Движок': 'Engine', 'Перехват пакетов': 'Packet capture',
   'У вас последняя версия.': 'You have the latest version.', 'Скачиваем обновление…': 'Downloading the update…',
   'Обновлений нет': 'No updates',
 

@@ -12,7 +12,7 @@ mkdirSync(outDir, { recursive: true });
 const browser = await chromium.launch({
   channel: 'msedge',
   headless: process.env.HEADED ? false : true,
-  args: ['--auto-accept-this-tab-capture', '--force-device-scale-factor=1', '--window-size=1944,1219'], // в невидимом окне Edge рамка съедает 24×139 — остаётся ровно 1920×1080
+  args: ['--auto-accept-this-tab-capture', '--force-device-scale-factor=1', '--autoplay-policy=no-user-gesture-required', '--window-size=1944,1219'], // в невидимом окне Edge рамка съедает 24×139 — остаётся ровно 1920×1080
 });
 const page = await browser.newPage({ viewport: null, acceptDownloads: true });
 page.on('console', (m) => m.type() === 'error' && console.log('console:', m.text()));

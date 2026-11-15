@@ -55,6 +55,7 @@
   .title .chips { margin-top: 34px; display: flex; gap: 14px; justify-content: center; }
   .title .chips span { padding: 10px 22px; border-radius: 99px; background: rgba(255,255,255,.08); border: 1px solid rgba(255,255,255,.12); font-size: 24px; }
   .title .url { margin-top: 30px; font-size: 26px; color: var(--accent); }
+  .title .url + .url { margin-top: 10px; color: #b4a6ff; }
   .flash { position: absolute; inset: 0; z-index: 40; background: #fff; opacity: 0; pointer-events: none; transition: opacity .5s; }
 </style>
 </head>
@@ -79,9 +80,11 @@
     <h1>Proryv</h1>
     <div class="chips"><span>Бесплатно</span><span>Открытый код</span><span>Windows 10/11</span></div>
     <div class="url">github.com/studiomurda09-dotcom/proryv</div>
+    <div class="url">discord.gg/SzRm7GNyU9</div>
   </div></div>
 
   <div class="flash" id="flash"></div>
+  <script src="sfx.js"></script>
   <script src="director.js"></script>
 </body>
 </html>

@@ -56,6 +56,7 @@ jobs:
             **Первый запуск:** разрешите права администратора, затем «Автоподбор» → «Подобрать» и большая кнопка на главной.
             Если Защитник Windows ругается на драйвер WinDivert: «Подробнее» → «Выполнить в любом случае».
             Не запускайте одновременно zapret или GoodbyeDPI.
+            Помощь и новости — в Discord: https://discord.gg/SzRm7GNyU9
 
             ## Download
             Get **`Proryv_…_x64-setup.exe`** (or the `.msi`). Existing installs update themselves from inside the app.

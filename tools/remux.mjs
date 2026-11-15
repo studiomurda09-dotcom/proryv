@@ -10,37 +10,50 @@ const ab = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
 ab.fileStart = 0;
 
 const file = MP4Box.createFile();
-let track = null;
-const samples = [];
+let vt = null, at = null;
+const samples = { v: [], a: [] };
 file.onReady = (info) => {
-  track = info.videoTracks[0];
-  file.setExtractionOptions(track.id, null, { nbSamples: 1e9 });
+  vt = info.videoTracks[0];
+  at = info.audioTracks[0] || null;
+  file.setExtractionOptions(vt.id, 'v', { nbSamples: 1e9 });
+  if (at) file.setExtractionOptions(at.id, 'a', { nbSamples: 1e9 });
   file.start();
 };
-file.onSamples = (_id, _user, s) => samples.push(...s);
+file.onSamples = (_id, kind, s) => samples[kind].push(...s);
 file.appendBuffer(ab);
 file.flush();
-if (!track || !samples.length) throw new Error('в файле нет видеодорожки');
+if (!vt || !samples.v.length) throw new Error('в файле нет видеодорожки');
 
-// Параметры кодека (avcC) — без них плеер не раскодирует поток.
-const entry = file.getTrackById(track.id).mdia.minf.stbl.stsd.entries[0];
+const stsd = (t) => file.getTrackById(t.id).mdia.minf.stbl.stsd.entries[0];
+
+// Параметры видеокодека (avcC) — без них плеер не раскодирует поток.
 const ds = new MP4Box.DataStream(undefined, 0, MP4Box.DataStream.BIG_ENDIAN);
-entry.avcC.write(ds);
-const description = new Uint8Array(ds.buffer, 8); // без заголовка бокса
+stsd(vt).avcC.write(ds);
+const avcC = new Uint8Array(ds.buffer, 8); // без заголовка бокса
+
+// Параметры AAC (AudioSpecificConfig) лежат в esds: ES → DecoderConfig (тег 4) → DecoderSpecificInfo (тег 5).
+let asc = null;
+if (at) {
+  const dcd = stsd(at).esds?.esd?.descs?.find((d) => d.tag === 4);
+  asc = dcd?.descs?.find((d) => d.tag === 5)?.data;
+  if (!asc) throw new Error('не нашёл параметры AAC');
+}
 
 const muxer = new Muxer({
   target: new ArrayBufferTarget(),
-  video: { codec: 'avc', width: track.video.width, height: track.video.height },
+  video: { codec: 'avc', width: vt.video.width, height: vt.video.height },
+  ...(at ? { audio: { codec: 'aac', numberOfChannels: at.audio.channel_count, sampleRate: at.audio.sample_rate } } : {}),
   fastStart: 'in-memory',
-  firstTimestampBehavior: 'offset',
+  firstTimestampBehavior: 'cross-track-offset',
 });
-samples.forEach((s, i) => {
-  const us = (v) => Math.round((v * 1e6) / s.timescale);
-  muxer.addVideoChunkRaw(new Uint8Array(s.data), s.is_sync ? 'key' : 'delta', us(s.dts), us(s.duration),
-    i === 0 ? { decoderConfig: { codec: track.codec, codedWidth: track.video.width, codedHeight: track.video.height, description } } : undefined,
-    us(s.cts - s.dts));
-});
+const us = (v, s) => Math.round((v * 1e6) / s.timescale);
+samples.v.forEach((s, i) => muxer.addVideoChunkRaw(new Uint8Array(s.data), s.is_sync ? 'key' : 'delta', us(s.dts, s), us(s.duration, s),
+  i === 0 ? { decoderConfig: { codec: vt.codec, codedWidth: vt.video.width, codedHeight: vt.video.height, description: avcC } } : undefined,
+  us(s.cts - s.dts, s)));
+samples.a.forEach((s, i) => muxer.addAudioChunkRaw(new Uint8Array(s.data), 'key', us(s.cts, s), us(s.duration, s),
+  i === 0 ? { decoderConfig: { codec: at.codec, numberOfChannels: at.audio.channel_count, sampleRate: at.audio.sample_rate, description: new Uint8Array(asc) } } : undefined));
 muxer.finalize();
 writeFileSync(output, Buffer.from(muxer.target.buffer));
-const secs = (samples.at(-1).dts - samples[0].dts) / samples[0].timescale;
-console.log(`${output}: ${track.video.width}×${track.video.height}, ${samples.length} кадров, ${secs.toFixed(1)} с, ~${(samples.length / secs).toFixed(0)} к/с`);
+const v = samples.v, secs = (v.at(-1).dts - v[0].dts) / v[0].timescale;
+console.log(`${output}: ${vt.video.width}×${vt.video.height}, ${v.length} кадров, ${secs.toFixed(1)} с, ~${(v.length / secs).toFixed(0)} к/с`
+  + (at ? `, звук AAC ${at.audio.sample_rate} Гц ${at.audio.channel_count} кан.` : ', без звука'));
