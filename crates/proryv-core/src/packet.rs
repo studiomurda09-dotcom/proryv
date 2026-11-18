@@ -146,6 +146,21 @@ pub fn dst_ip(p: &[u8]) -> Option<u128> {
     Some(crate::platform::ip_key(ip))
 }
 
+/// Входящий SYN-ACK: (адрес сервера, TTL / hop limit) — для autottl.
+pub fn syn_ack_ttl(p: &[u8]) -> Option<(u128, u8)> {
+    use std::net::IpAddr;
+    let info = parse_tcp(p)?;
+    if p[info.ip_hdr_len + 13] & 0x12 != 0x12 {
+        return None;
+    }
+    let (ip, ttl): (IpAddr, u8) = if info.v6 {
+        (<[u8; 16]>::try_from(&p[8..24]).ok()?.into(), p[7])
+    } else {
+        (<[u8; 4]>::try_from(&p[12..16]).ok()?.into(), p[8])
+    };
+    Some((crate::platform::ip_key(ip), ttl))
+}
+
 pub fn build_udp(orig: &[u8], info: &UdpInfo, payload: &[u8]) -> Vec<u8> {
     let t = info.ip_hdr_len;
     let mut p = Vec::with_capacity(t + 8 + payload.len());
@@ -250,6 +265,9 @@ pub fn build_segment_ex(orig: &[u8], info: &TcpInfo, seg: &Segment, ip_id_zero: 
         seq = seq.wrapping_sub(10_000);
     }
     p[t + 4..t + 8].copy_from_slice(&seq.to_be_bytes());
+    if seg.fooling.contains(&Fooling::DataNoAck) {
+        p[t + 13] &= !0x10;
+    }
 
     let total = p.len();
     if info.v6 {
@@ -466,5 +484,27 @@ pub(crate) mod tests {
         let p = build_segment(&orig, &info, &seg);
         assert!(!checksum_ok(&p));
         assert_eq!(parse_tcp(&p).unwrap().seq, 1u32.wrapping_sub(10_000));
+    }
+
+    #[test]
+    fn datanoack_clears_ack_flag() {
+        let orig = make_v4(b"abc", 1);
+        let info = parse_tcp(&orig).unwrap();
+        let seg = Segment { kind: SegKind::Fake, seq_offset: 0, data: b"x".to_vec(), ttl: None,
+            fooling: vec![Fooling::DataNoAck], label: String::new() };
+        let p = build_segment(&orig, &info, &seg);
+        assert_eq!(orig[33] & 0x10, 0x10);
+        assert_eq!(p[33] & 0x10, 0);
+        assert!(checksum_ok(&p));
+    }
+
+    #[test]
+    fn syn_ack_ttl_reads_server_and_ttl() {
+        let mut p = make_v4(b"", 0);
+        p[33] = 0x12; // SYN+ACK
+        p[8] = 52;
+        assert_eq!(syn_ack_ttl(&p), Some((crate::platform::ip_key("192.168.1.10".parse().unwrap()), 52)));
+        p[33] = 0x18; // PSH+ACK — не SYN-ACK
+        assert_eq!(syn_ack_ttl(&p), None);
     }
 }

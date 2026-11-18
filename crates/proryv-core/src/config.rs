@@ -29,8 +29,12 @@ pub struct Settings {
     pub first_run_done: bool,
     /// "system" | "ru" | "en"
     pub language: String,
-    /// "system" | "dark" | "light"
+    /// "dark" | "light" | "black"
     pub theme: String,
+    /// Своя картинка на фоне окна (data URL, уменьшенная интерфейсом).
+    pub bg_image: String,
+    /// Затемнение картинки, 0–90 %.
+    pub bg_dim: u8,
     /// "none" | "mica" | "acrylic"
     pub backdrop: String,
     /// Акцентный цвет, #rrggbb
@@ -77,6 +81,8 @@ impl Default for Settings {
             first_run_done: false,
             language: "system".into(),
             theme: "dark".into(),
+            bg_image: String::new(),
+            bg_dim: 60,
             backdrop: "acrylic".into(),
             accent: "#7cc4e4".into(),
             animations: true,

@@ -4,3 +4,4 @@ src-tauri/gen
 /dist
 /.claude
 /promo/out
+*.local.md

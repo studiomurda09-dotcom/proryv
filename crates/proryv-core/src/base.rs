@@ -203,6 +203,10 @@ pub fn check_strategy(s: &Strategy) -> Result<(), String> {
             Desync::SeqOverlap { len, sni } => *len <= MAX_SEQOVL && sni.len() <= 253,
             Desync::Fake { ttl, repeats, .. } => *ttl <= 64 && (1..=MAX_REPEATS).contains(repeats),
             Desync::HostCase => true,
+            // Без fooling фейк-нули дойдут до сервера раньше настоящих данных и испортят их.
+            Desync::FakedSplit { at, ttl, fooling, .. } => pos_ok(at) && *ttl <= 64 && !fooling.is_empty(),
+            Desync::HostFakeSplit { ttl, fooling } => *ttl <= 64 && !fooling.is_empty(),
+            Desync::AutoTtl { delta, min, max } => (-20..=20).contains(delta) && (1..=*max).contains(min) && *max <= 64,
         };
         if !ok {
             return Err(format!("{}: недопустимый шаг {step:?}", s.id));

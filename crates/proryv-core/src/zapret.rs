@@ -124,29 +124,41 @@ fn parse_block(args: &[(String, String)]) -> Option<Parsed> {
     };
     let pos_text = get("dpi-desync-split-pos").unwrap_or("2");
 
-    if modes.contains(&"fake") {
-        let repeats: u8 = get("dpi-desync-repeats").and_then(|v| v.parse().ok()).unwrap_or(1).clamp(1, 32);
-        let mut fooling = Vec::new();
+    let fake_modes = ["fake", "fakedsplit", "fakeddisorder", "hostfakesplit"];
+    let mut fooling = Vec::new();
+    let mut ttl = 0;
+    let autottl = get("dpi-desync-autottl").and_then(|v| {
+        let r = parse_autottl(v);
+        if r.is_none() {
+            warnings.push(format!("--dpi-desync-autottl={v} не понят — пропущен"));
+        }
+        r
+    });
+    if modes.iter().any(|m| fake_modes.contains(m)) {
         for f in get("dpi-desync-fooling").unwrap_or("").split(',').filter(|f| !f.is_empty()) {
-            match f {
-                "ts" => fooling.push(Fooling::Ts),
-                "badseq" => fooling.push(Fooling::BadSeq),
-                "badsum" => fooling.push(Fooling::BadSum),
-                "md5sig" => fooling.push(Fooling::Md5Sig),
-                other => warnings.push(format!("fooling={other} не поддерживается — пропущен")),
+            match fooling_from(f) {
+                Some(x) => fooling.push(x),
+                None => warnings.push(format!("fooling={f} не поддерживается — пропущен")),
             }
         }
-        let mut ttl = 0;
         if let Some(t) = get("dpi-desync-ttl").and_then(|v| v.parse::<u8>().ok()) {
             ttl = t.min(64);
             fooling.push(Fooling::Ttl);
-        }
-        if get("dpi-desync-autottl").is_some() {
-            warnings.push("--dpi-desync-autottl пока не поддерживается — пропущен".into());
+        } else if let Some((_, min, _)) = autottl {
+            // Пока хопы неизвестны, фейк всё равно не должен дойти до сервера.
+            ttl = min;
+            fooling.push(Fooling::Ttl);
         }
         if fooling.is_empty() {
             warnings.push("у фейка нет fooling и ttl — он может дойти до сервера и сломать соединение".into());
+        } else {
+            let names: Vec<&str> = fooling.iter().map(fooling_name).collect();
+            recognized.push(format!("fooling={}", names.join(",")) + &if ttl > 0 { format!(" ttl={ttl}") } else { String::new() });
         }
+    }
+
+    if modes.contains(&"fake") {
+        let repeats: u8 = get("dpi-desync-repeats").and_then(|v| v.parse().ok()).unwrap_or(1).clamp(1, 32);
         let sni = args
             .iter()
             .filter(|(k, _)| k == "dpi-desync-fake-tls")
@@ -155,21 +167,11 @@ fn parse_block(args: &[(String, String)]) -> Option<Parsed> {
             .map(FakeSni::Fixed)
             .unwrap_or(FakeSni::Random);
         recognized.push(format!("fake ×{repeats}"));
-        if !fooling.is_empty() {
-            let names: Vec<&str> = fooling.iter().map(|f| match f {
-                Fooling::Ts => "ts",
-                Fooling::BadSeq => "badseq",
-                Fooling::BadSum => "badsum",
-                Fooling::Md5Sig => "md5sig",
-                Fooling::Ttl => "ttl",
-            }).collect();
-            recognized.push(format!("fooling={}", names.join(",")) + &if ttl > 0 { format!(" ttl={ttl}") } else { String::new() });
-        }
         match &sni {
             FakeSni::Fixed(s) => recognized.push(format!("fake-tls → {s}")),
             FakeSni::Random => recognized.push("фейк: случайный сайт".into()),
         }
-        steps.push(Desync::Fake { ttl, fooling, sni, repeats });
+        steps.push(Desync::Fake { ttl, fooling: fooling.clone(), sni, repeats });
     }
 
     for m in &modes {
@@ -191,6 +193,15 @@ fn parse_block(args: &[(String, String)]) -> Option<Parsed> {
                 steps.push(Desync::Disorder { at: positions.first().copied().unwrap_or(Pos::abs(2)) });
                 recognized.push(format!("disorder @{pos_text}"));
             }
+            "fakedsplit" | "fakeddisorder" => {
+                let disorder = *m == "fakeddisorder";
+                steps.push(Desync::FakedSplit { at: positions.first().copied().unwrap_or(Pos::abs(2)), ttl, fooling: fooling.clone(), disorder });
+                recognized.push(format!("{m} @{pos_text}"));
+            }
+            "hostfakesplit" => {
+                steps.push(Desync::HostFakeSplit { ttl, fooling: fooling.clone() });
+                recognized.push("hostfakesplit".into());
+            }
             other => warnings.push(format!("режим {other} пока не поддерживается — пропущен")),
         }
     }
@@ -203,6 +214,13 @@ fn parse_block(args: &[(String, String)]) -> Option<Parsed> {
         }
         steps.push(Desync::SeqOverlap { len, sni: sni.clone() });
         recognized.push(format!("seqovl {len} ({sni})"));
+    }
+
+    if let Some((delta, min, max)) = autottl {
+        if steps.iter().any(|s| matches!(s, Desync::Fake { .. } | Desync::FakedSplit { .. } | Desync::HostFakeSplit { .. })) {
+            steps.push(Desync::AutoTtl { delta, min, max });
+            recognized.push(format!("autottl {delta:+} ({min}–{max})"));
+        }
     }
 
     for (k, _) in args {
@@ -238,6 +256,45 @@ fn parse_block(args: &[(String, String)]) -> Option<Parsed> {
     Some(Parsed { label: label.clone(), strategy: Strategy { id, name: label, description: zapret.clone(), steps }, recognized, warnings, zapret })
 }
 
+fn fooling_from(s: &str) -> Option<Fooling> {
+    Some(match s {
+        "ts" => Fooling::Ts,
+        "badseq" => Fooling::BadSeq,
+        "badsum" => Fooling::BadSum,
+        "md5sig" => Fooling::Md5Sig,
+        "datanoack" => Fooling::DataNoAck,
+        _ => return None,
+    })
+}
+
+fn fooling_name(f: &Fooling) -> &'static str {
+    match f {
+        Fooling::Ts => "ts",
+        Fooling::BadSeq => "badseq",
+        Fooling::BadSum => "badsum",
+        Fooling::Md5Sig => "md5sig",
+        Fooling::DataNoAck => "datanoack",
+        Fooling::Ttl => "ttl",
+    }
+}
+
+/// `--dpi-desync-autottl=[delta[:min[-max]]]`. Число без знака — сколько хопов
+/// отнять (как в старых zapret), поэтому «2» = −2. По умолчанию −1:3-20.
+fn parse_autottl(v: &str) -> Option<(i8, u8, u8)> {
+    let (d, range) = v.split_once(':').unwrap_or((v, ""));
+    let delta = match d.trim() {
+        "" => -1,
+        d if d.starts_with(['+', '-']) => d.parse().ok()?,
+        d => -d.parse::<i8>().ok()?,
+    };
+    let (min, max) = match range.split_once('-') {
+        Some((a, b)) => (a.parse().ok()?, b.parse().ok()?),
+        None if range.is_empty() => (3, 20),
+        None => (range.parse().ok()?, 20),
+    };
+    (min >= 1 && min <= max && max <= 64 && (-20..=20).contains(&delta)).then_some((delta, min, max))
+}
+
 fn fnv(s: &str) -> u32 {
     s.bytes().fold(0x811c_9dc5u32, |h, b| (h ^ b as u32).wrapping_mul(0x0100_0193))
 }
@@ -264,43 +321,55 @@ pub fn to_zapret(s: &Strategy) -> String {
 
 fn to_zapret_args(steps: &[Desync]) -> String {
     let mut modes = Vec::new();
-    let mut extra = Vec::new();
+    let mut extra: Vec<String> = Vec::new();
+    fn add(extra: &mut Vec<String>, a: String) {
+        if !extra.contains(&a) {
+            extra.push(a);
+        }
+    }
+    fn fool(extra: &mut Vec<String>, ttl: u8, fooling: &[Fooling]) {
+        let f: Vec<&str> = fooling.iter().filter(|f| **f != Fooling::Ttl).map(fooling_name).collect();
+        if !f.is_empty() {
+            add(extra, format!("--dpi-desync-fooling={}", f.join(",")));
+        }
+        if fooling.contains(&Fooling::Ttl) {
+            add(extra, format!("--dpi-desync-ttl={ttl}"));
+        }
+    }
     for st in steps {
         match st {
             Desync::Fake { ttl, fooling, sni, repeats } => {
                 modes.push("fake");
-                let f: Vec<&str> = fooling.iter().filter_map(|f| match f {
-                    Fooling::Ts => Some("ts"),
-                    Fooling::BadSeq => Some("badseq"),
-                    Fooling::BadSum => Some("badsum"),
-                    Fooling::Md5Sig => Some("md5sig"),
-                    Fooling::Ttl => None,
-                }).collect();
-                if !f.is_empty() {
-                    extra.push(format!("--dpi-desync-fooling={}", f.join(",")));
-                }
-                if fooling.contains(&Fooling::Ttl) {
-                    extra.push(format!("--dpi-desync-ttl={ttl}"));
-                }
-                extra.push(format!("--dpi-desync-repeats={repeats}"));
+                fool(&mut extra, *ttl, fooling);
+                add(&mut extra, format!("--dpi-desync-repeats={repeats}"));
                 if let FakeSni::Fixed(h) = sni {
-                    extra.push(format!("--dpi-desync-fake-tls=tls_clienthello_{}.bin", h.replace('.', "_")));
+                    add(&mut extra, format!("--dpi-desync-fake-tls=tls_clienthello_{}.bin", h.replace('.', "_")));
                 }
             }
             Desync::Split { at } | Desync::Disorder { at } => {
                 modes.push(if matches!(st, Desync::Split { .. }) { "split2" } else { "disorder2" });
-                extra.push(format!("--dpi-desync-split-pos={}", pos_str(at)));
+                add(&mut extra, format!("--dpi-desync-split-pos={}", pos_str(at)));
             }
             Desync::MultiSplit { at } | Desync::MultiDisorder { at } => {
                 modes.push(if matches!(st, Desync::MultiSplit { .. }) { "multisplit" } else { "multidisorder" });
-                extra.push(format!("--dpi-desync-split-pos={}", at.iter().map(pos_str).collect::<Vec<_>>().join(",")));
+                add(&mut extra, format!("--dpi-desync-split-pos={}", at.iter().map(pos_str).collect::<Vec<_>>().join(",")));
             }
+            Desync::FakedSplit { at, ttl, fooling, disorder } => {
+                modes.push(if *disorder { "fakeddisorder" } else { "fakedsplit" });
+                fool(&mut extra, *ttl, fooling);
+                add(&mut extra, format!("--dpi-desync-split-pos={}", pos_str(at)));
+            }
+            Desync::HostFakeSplit { ttl, fooling } => {
+                modes.push("hostfakesplit");
+                fool(&mut extra, *ttl, fooling);
+            }
+            Desync::AutoTtl { delta, min, max } => add(&mut extra, format!("--dpi-desync-autottl={delta:+}:{min}-{max}")),
             Desync::SeqOverlap { len, sni } => {
-                extra.push(format!("--dpi-desync-split-seqovl={len}"));
-                extra.push(format!("--dpi-desync-split-seqovl-pattern=tls_clienthello_{}.bin", sni.replace('.', "_")));
+                add(&mut extra, format!("--dpi-desync-split-seqovl={len}"));
+                add(&mut extra, format!("--dpi-desync-split-seqovl-pattern=tls_clienthello_{}.bin", sni.replace('.', "_")));
             }
-            Desync::TlsRecordSplit { .. } => extra.push("# tlsrec (только Proryv)".into()),
-            Desync::HostCase => extra.push("--hostcase".into()),
+            Desync::TlsRecordSplit { .. } => add(&mut extra, "# tlsrec (только Proryv)".into()),
+            Desync::HostCase => add(&mut extra, "--hostcase".into()),
         }
     }
     let mut out = vec![format!("--dpi-desync={}", modes.join(","))];
@@ -346,9 +415,25 @@ mod tests {
 
     #[test]
     fn unsupported_is_reported_not_dropped() {
-        let p = parse("--dpi-desync=fake,fakedsplit --dpi-desync-autottl=2 --dpi-desync-fooling=datanoack,ts --dpi-desync-split-pos=1,sld+1").unwrap();
+        let p = parse("--dpi-desync=fake,fakeknot --dpi-desync-fooling=hopbyhop,ts --dpi-desync-split-pos=1,sld+1").unwrap();
         let w = p[0].warnings.join("\n");
-        assert!(w.contains("fakedsplit") && w.contains("autottl") && w.contains("datanoack") && w.contains("sld+1"), "{w}");
+        assert!(w.contains("fakeknot") && w.contains("hopbyhop") && w.contains("sld+1"), "{w}");
+    }
+
+    #[test]
+    fn faked_modes_and_autottl() {
+        let p = parse("--dpi-desync=fake,fakedsplit --dpi-desync-autottl=2 --dpi-desync-fooling=datanoack,ts --dpi-desync-split-pos=1").unwrap();
+        let s = &p[0].strategy.steps;
+        assert!(p[0].warnings.is_empty(), "{:?}", p[0].warnings);
+        assert!(matches!(&s[1], Desync::FakedSplit { ttl: 3, disorder: false, fooling, .. } if fooling == &vec![Fooling::DataNoAck, Fooling::Ts, Fooling::Ttl]));
+        assert_eq!(s[2], Desync::AutoTtl { delta: -2, min: 3, max: 20 });
+        let back = parse(&to_zapret(&p[0].strategy)).unwrap();
+        assert_eq!(&back[0].strategy.steps, s);
+        let h = parse("--dpi-desync=hostfakesplit --dpi-desync-fooling=badseq").unwrap();
+        assert_eq!(h[0].strategy.steps, vec![Desync::HostFakeSplit { ttl: 0, fooling: vec![Fooling::BadSeq] }]);
+        assert_eq!(parse_autottl(""), Some((-1, 3, 20)));
+        assert_eq!(parse_autottl("+1:4-12"), Some((1, 4, 12)));
+        assert_eq!(parse_autottl("1:30-5"), None);
     }
 
     #[test]

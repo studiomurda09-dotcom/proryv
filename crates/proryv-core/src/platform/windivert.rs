@@ -82,7 +82,13 @@ pub fn filter_string(f: &Filter) -> String {
         }
     }
     let skip: String = f.exclude_ifs.iter().map(|i| format!(" and ifIdx != {i}")).collect();
-    format!("outbound and !loopback and !impostor{skip} and ({})", parts.join(" or "))
+    let out = format!("outbound and !loopback and !impostor{skip} and ({})", parts.join(" or "));
+    if !f.syn_ack {
+        return out;
+    }
+    let ports = if f.tcp_ports.is_empty() { vec![443] } else { f.tcp_ports.clone() };
+    let src = ports.iter().map(|p| format!("tcp.SrcPort == {p}")).collect::<Vec<_>>().join(" or ");
+    format!("({out}) or (inbound and !loopback{skip} and tcp.Syn and tcp.Ack and ({src}))")
 }
 
 /// Результат PowerShell живёт 30 с: запрос медленный, а VPN включают и выключают нечасто.
@@ -185,6 +191,8 @@ impl WinDivert {
                     Some(5) => PlatformError::NotElevated,
                     Some(2) | Some(3) => PlatformError::DriverMissing("WinDivert64.sys".into()),
                     Some(577) | Some(1275) | Some(1058) => PlatformError::DriverBlocked(err.to_string()),
+                    // FWP_E_IN_USE: фильтры WFP держит драйвер WinDivert другой версии (zapret, GoodbyeDPI).
+                    Some(-2144206838) => PlatformError::DriverInUse,
                     _ => PlatformError::Io(err),
                 });
             }
@@ -288,6 +296,7 @@ mod tests {
             game_udp: true,
             game_nets: vec![crate::platform::parse_cidr("128.116.0.0/17").unwrap(), crate::platform::parse_cidr("2620:2b:e000::/40").unwrap()],
             exclude_ifs: vec![17],
+            syn_ack: true,
         };
         let s = CString::new(filter_string(&f)).unwrap();
         let (mut err, mut pos) = (std::ptr::null(), 0u32);

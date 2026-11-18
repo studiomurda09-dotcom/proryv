@@ -34,6 +34,21 @@ pub fn test_urls(preset_id: &str) -> Vec<&'static str> {
     }
 }
 
+/// Адреса проверки с учётом настроек: для «Своих доменов» — сайты из списка пользователя.
+pub fn urls_for(preset_id: &str, settings: &Settings) -> Vec<String> {
+    if preset_id == "universal" {
+        return settings
+            .custom_domains
+            .iter()
+            .map(|d| d.trim().trim_start_matches("*.").trim_start_matches('.'))
+            .filter(|d| !d.is_empty())
+            .take(8)
+            .map(|d| format!("https://{d}/"))
+            .collect();
+    }
+    test_urls(preset_id).into_iter().map(String::from).collect()
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Check {
     pub url: String,
@@ -152,7 +167,8 @@ fn try_strategy(preset_id: &str, sid: &str, base: &Settings, urls: &[&str], ifac
 /// Проверить одну стратегию на пресете (кнопка «Проверить» в режиме разработчика).
 /// Основной движок на время проверки должен быть остановлен.
 pub fn check_one(preset_id: &str, sid: &str, base: &Settings) -> Result<(usize, usize), String> {
-    let urls = test_urls(preset_id);
+    let urls = urls_for(preset_id, base);
+    let urls: Vec<&str> = urls.iter().map(String::as_str).collect();
     if urls.is_empty() {
         return Err("для этого пресета нет адресов проверки".into());
     }
@@ -168,9 +184,10 @@ pub fn check_one(preset_id: &str, sid: &str, base: &Settings) -> Result<(usize, 
 /// Основной движок на время подбора должен быть остановлен.
 pub fn run(preset_id: &str, base: &Settings, mut on_progress: impl FnMut(&Progress)) -> Result<Outcome, String> {
     let preset = crate::base::presets().into_iter().find(|p| p.id == preset_id).ok_or("неизвестный пресет")?;
-    let urls = test_urls(preset_id);
+    let urls = urls_for(preset_id, base);
+    let urls: Vec<&str> = urls.iter().map(String::as_str).collect();
     if urls.is_empty() {
-        return Err("для этого пресета нет адресов проверки".into());
+        return Err(if preset_id == "universal" { "добавьте сайты в «Свои домены»".into() } else { "для этого пресета нет адресов проверки".into() });
     }
     let names: std::collections::HashMap<String, String> =
         crate::base::strategies().into_iter().map(|s| (s.id, s.name)).collect();
@@ -180,7 +197,19 @@ pub fn run(preset_id: &str, base: &Settings, mut on_progress: impl FnMut(&Progre
     #[cfg(not(windows))]
     let iface: Option<String> = None;
 
-    let total = preset.strategies.len() + 1;
+    // Для своих доменов перебираем все стратегии: ищем одну, которая откроет больше всего сайтов.
+    let order: Vec<String> = if preset_id == "universal" {
+        let mut v = preset.strategies.clone();
+        for id in crate::base::strategies().into_iter().map(|s| s.id) {
+            if !v.contains(&id) && id != "http_hostcase" {
+                v.push(id);
+            }
+        }
+        v
+    } else {
+        preset.strategies.clone()
+    };
+    let total = order.len() + 1;
     let mut results = Vec::new();
 
     let (base_ok, base_ms, _) = check_all(&urls, iface.as_deref());
@@ -191,7 +220,7 @@ pub fn run(preset_id: &str, base: &Settings, mut on_progress: impl FnMut(&Progre
     on_progress(&p);
     results.push(p);
 
-    for (i, sid) in preset.strategies.iter().enumerate() {
+    for (i, sid) in order.iter().enumerate() {
         let (ok, ms) = try_strategy(preset_id, sid, base, &urls, iface.as_deref())?;
         let p = Progress {
             preset: preset_id.into(), strategy: sid.clone(), strategy_name: names.get(sid).cloned().unwrap_or_default(),

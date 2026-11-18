@@ -6,9 +6,13 @@ window.MOCK_DATA = {
     "auto_heal": true,
     "autostart": false,
     "backdrop": "acrylic",
+    "bg_dim": 60,
+    "bg_image": "",
     "block_quic": true,
     "check_updates": true,
     "custom_domains": [],
+    "custom_strategies": [],
+    "dev_mode": false,
     "doh": true,
     "doh_server": "https://cloudflare-dns.com/dns-query",
     "enable_on_launch": false,
@@ -71,7 +75,11 @@ window.MOCK_DATA = {
         "seqovl_google",
         "fake_ts",
         "seqovl_4pda",
-        "multisplit_host"
+        "multisplit_host",
+        "faked_split_ts",
+        "host_fake_split",
+        "faked_disorder_ts",
+        "fake_noack_split"
       ],
       "tcp_ports": [
         443
@@ -121,7 +129,10 @@ window.MOCK_DATA = {
         "fake_multidisorder",
         "seqovl_4pda",
         "alt7",
-        "disorder_1"
+        "disorder_1",
+        "faked_split_ts",
+        "host_fake_split",
+        "fake_noack_split"
       ],
       "tcp_ports": [
         443,
@@ -157,7 +168,11 @@ window.MOCK_DATA = {
       "strategies": [
         "seqovl_4pda",
         "fake_multidisorder",
-        "multisplit_host"
+        "multisplit_host",
+        "faked_split_ts",
+        "host_fake_split",
+        "faked_disorder_ts",
+        "fake_noack_split"
       ],
       "tcp_ports": [
         443
@@ -228,7 +243,11 @@ window.MOCK_DATA = {
         "alt7",
         "seqovl_4pda",
         "multisplit_host",
-        "http_hostcase"
+        "http_hostcase",
+        "faked_split_ts",
+        "host_fake_split",
+        "faked_disorder_ts",
+        "fake_noack_split"
       ],
       "tcp_ports": [
         80,
@@ -261,7 +280,11 @@ window.MOCK_DATA = {
         "alt11",
         "fake_multidisorder",
         "alt7",
-        "seqovl_4pda"
+        "seqovl_4pda",
+        "faked_split_ts",
+        "host_fake_split",
+        "faked_disorder_ts",
+        "fake_noack_split"
       ],
       "tcp_ports": [
         443
@@ -281,7 +304,11 @@ window.MOCK_DATA = {
         "alt7",
         "seqovl_4pda",
         "multisplit_host",
-        "http_hostcase"
+        "http_hostcase",
+        "faked_split_ts",
+        "host_fake_split",
+        "faked_disorder_ts",
+        "fake_noack_split"
       ],
       "tcp_ports": [
         80,
@@ -299,7 +326,7 @@ window.MOCK_DATA = {
     {
       "description": "Разрез на 2-м байте и сразу после начала SNI, наложение 679 байт фейка к google.com (general ALT7).",
       "id": "alt7",
-      "name": "ALT7: наложение + разрез у SNI",
+      "name": "Split + Overlap (ALT7)",
       "steps": [
         {
           "at": [
@@ -324,7 +351,7 @@ window.MOCK_DATA = {
     {
       "description": "8 фейков, которые сервер отбросит по timestamp, затем наложение 681 байт (general ALT11).",
       "id": "alt11",
-      "name": "ALT11: фейки (ts) + наложение",
+      "name": "Fake TS + Overlap (ALT11)",
       "steps": [
         {
           "fooling": [
@@ -357,7 +384,7 @@ window.MOCK_DATA = {
     {
       "description": "6 фейковых ClientHello к google.com с уменьшенным timestamp (general ALT10).",
       "id": "fake_ts",
-      "name": "Фейки (ts)",
+      "name": "Fake TS",
       "steps": [
         {
           "fooling": [
@@ -376,7 +403,7 @@ window.MOCK_DATA = {
     {
       "description": "Перед данными — 681 байт фейкового ClientHello к google.com «из прошлого». Основной метод zapret для YouTube.",
       "id": "seqovl_google",
-      "name": "Наложение (Google)",
+      "name": "Overlap · Google",
       "steps": [
         {
           "at": [
@@ -397,7 +424,7 @@ window.MOCK_DATA = {
     {
       "description": "То же наложение, 568 байт к 4pda.to. Метод zapret для Discord и остальных сайтов.",
       "id": "seqovl_4pda",
-      "name": "Наложение (4pda)",
+      "name": "Overlap · 4pda",
       "steps": [
         {
           "at": [
@@ -418,7 +445,7 @@ window.MOCK_DATA = {
     {
       "description": "11 фейков с неверным seq, потом части задом наперёд (разрез посередине домена).",
       "id": "fake_multidisorder",
-      "name": "Фейки + обратный порядок",
+      "name": "Fake BadSeq + Disorder",
       "steps": [
         {
           "fooling": [
@@ -450,7 +477,7 @@ window.MOCK_DATA = {
     {
       "description": "Режет ClientHello посередине SNI.",
       "id": "split_mid",
-      "name": "Разрез посередине имени",
+      "name": "Split Mid-Host",
       "steps": [
         {
           "at": {
@@ -464,7 +491,7 @@ window.MOCK_DATA = {
     {
       "description": "Режет после 1 байта и отправляет части задом наперёд.",
       "id": "disorder_1",
-      "name": "Беспорядок",
+      "name": "Disorder",
       "steps": [
         {
           "at": {
@@ -478,7 +505,7 @@ window.MOCK_DATA = {
     {
       "description": "Режет перед, в середине и после имени сайта.",
       "id": "multisplit_host",
-      "name": "Мультиразрез",
+      "name": "Multi-Split Host",
       "steps": [
         {
           "at": [
@@ -506,7 +533,7 @@ window.MOCK_DATA = {
     {
       "description": "Сначала поддельный ClientHello с малым TTL, потом настоящий с разрезом.",
       "id": "fake_ttl_split",
-      "name": "Фейк (TTL) + разрез",
+      "name": "Fake TTL + Split",
       "steps": [
         {
           "fooling": [
@@ -531,7 +558,7 @@ window.MOCK_DATA = {
     {
       "description": "Фейк с неверным seq и отправка частей задом наперёд.",
       "id": "fake_badseq_disorder",
-      "name": "Фейк (badseq) + беспорядок",
+      "name": "Fake BadSeq + Reverse",
       "steps": [
         {
           "fooling": [
@@ -554,9 +581,99 @@ window.MOCK_DATA = {
       ]
     },
     {
+      "description": "Фейк к google.com, затем ClientHello режется на 1-м байте, и каждый кусок окружён фейком той же длины (fooling=ts).",
+      "id": "faked_split_ts",
+      "name": "Faked Split TS",
+      "steps": [
+        {
+          "fooling": [
+            "ts"
+          ],
+          "kind": "fake",
+          "repeats": 6,
+          "sni": {
+            "mode": "fixed",
+            "value": "www.google.com"
+          },
+          "ttl": 0
+        },
+        {
+          "at": {
+            "add": 1,
+            "anchor": "start"
+          },
+          "disorder": false,
+          "fooling": [
+            "ts"
+          ],
+          "kind": "faked_split",
+          "ttl": 0
+        }
+      ]
+    },
+    {
+      "description": "Разрез посередине домена, куски задом наперёд, вокруг каждого — фейки той же длины, которые сервер отбросит по timestamp.",
+      "id": "faked_disorder_ts",
+      "name": "Faked Disorder TS",
+      "steps": [
+        {
+          "at": {
+            "add": 0,
+            "anchor": "midsld"
+          },
+          "disorder": true,
+          "fooling": [
+            "ts"
+          ],
+          "kind": "faked_split",
+          "ttl": 0
+        }
+      ]
+    },
+    {
+      "description": "Имя сайта уходит отдельным куском, а до и после него — фейки с выдуманным именем той же длины.",
+      "id": "host_fake_split",
+      "name": "Host Fake Split",
+      "steps": [
+        {
+          "fooling": [
+            "ts"
+          ],
+          "kind": "host_fake_split",
+          "ttl": 0
+        }
+      ]
+    },
+    {
+      "description": "Фейки без флага ACK (сервер их отбросит, DPI — нет), затем разрез посередине имени.",
+      "id": "fake_noack_split",
+      "name": "Fake NoACK + Split",
+      "steps": [
+        {
+          "fooling": [
+            "data_no_ack"
+          ],
+          "kind": "fake",
+          "repeats": 4,
+          "sni": {
+            "mode": "fixed",
+            "value": "www.google.com"
+          },
+          "ttl": 0
+        },
+        {
+          "at": {
+            "add": 0,
+            "anchor": "host_mid"
+          },
+          "kind": "split"
+        }
+      ]
+    },
+    {
       "description": "Для обычного HTTP: hoSt вместо Host + разрез.",
       "id": "http_hostcase",
-      "name": "HTTP: регистр Host",
+      "name": "HTTP Host Case",
       "steps": [
         {
           "kind": "host_case"
@@ -571,5 +688,5 @@ window.MOCK_DATA = {
       ]
     }
   ],
-  "version": "0.2.1"
+  "version": "0.4.0"
 };

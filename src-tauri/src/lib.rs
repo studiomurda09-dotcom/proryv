@@ -339,11 +339,29 @@ fn check_conflicts() -> Vec<Conflict> {
     }
     let Ok(out) = cmd.output() else { return vec![] };
     let text = String::from_utf8_lossy(&out.stdout).to_lowercase();
-    KNOWN_CONFLICTS
+    let mut found: Vec<Conflict> = KNOWN_CONFLICTS
         .iter()
         .filter(|(exe, _)| text.contains(&format!("\"{exe}\"")))
         .map(|(exe, name)| Conflict { process: exe.to_string(), name: name.to_string() })
-        .collect()
+        .collect();
+    for (svc, name) in platform::CONFLICT_SERVICES {
+        if service_running(svc) && !found.iter().any(|c| c.name == *name) {
+            found.push(Conflict { process: svc.to_string(), name: name.to_string() });
+        }
+    }
+    found
+}
+
+/// `sc query <name>` → служба установлена и запущена.
+fn service_running(name: &str) -> bool {
+    let mut cmd = std::process::Command::new("sc");
+    cmd.args(["query", name]);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    cmd.output().map(|o| String::from_utf8_lossy(&o.stdout).contains("RUNNING")).unwrap_or(false)
 }
 
 #[tauri::command(async)]
@@ -374,7 +392,7 @@ struct TuneDone {
 fn run_tune(app: &AppHandle, preset: &str, source: &'static str) {
     let state = app.state::<AppState>();
     let was_running = is_running(&state);
-    stop_engine(&state);
+    state.engine.lock().unwrap().pause();
     let base = state.settings.lock().unwrap().clone();
     let res: Result<Outcome, String> = autotune::run(preset, &base, |p: &Progress| {
         if source == "manual" {
@@ -431,32 +449,39 @@ fn autotune_start(app: AppHandle, preset: String) -> Result<(), String> {
 
 /// Самолечение: раз в 20 с смотрим долю повторных ClientHello по пресетам.
 /// Если за окно много повторов (соединения не проходят) — тихо переподбираем стратегию.
+/// Плюс сторож: раз в 5 минут сам открывает адреса проверки включённых пресетов —
+/// так поломка находится, даже если сайтом сейчас никто не пользуется.
 fn spawn_healer(app: AppHandle) {
     std::thread::spawn(move || {
         use std::{collections::HashMap, time::{Duration, Instant}};
         let mut prev: HashMap<String, (u64, u64)> = HashMap::new();
         let mut last_heal: HashMap<String, Instant> = HashMap::new();
+        let mut last_watch = Instant::now();
         loop {
             std::thread::sleep(Duration::from_secs(20));
             let state = app.state::<AppState>();
-            let auto_heal = state.settings.lock().unwrap().auto_heal;
-            if !auto_heal || state.autotune_running.load(Ordering::SeqCst) || !is_running(&state) {
+            let settings = state.settings.lock().unwrap().clone();
+            if !settings.auto_heal || state.autotune_running.load(Ordering::SeqCst) || !is_running(&state) {
                 prev.clear();
                 continue;
             }
+            let cooled = |p: &str| last_heal.get(p).is_none_or(|t| t.elapsed() > Duration::from_secs(15 * 60));
             let now_h = state.engine.lock().unwrap().health();
             let mut target = None;
             for (preset, (d, r)) in &now_h {
                 let (pd, pr) = prev.get(preset).copied().unwrap_or((0, 0));
                 let (dd, dr) = (d.saturating_sub(pd), r.saturating_sub(pr));
-                let cooled = last_heal.get(preset).is_none_or(|t| t.elapsed() > Duration::from_secs(15 * 60));
                 // ≥4 повторов и не меньше трети всех соединений за окно.
-                if dr >= 4 && dr * 3 >= dd && cooled && !autotune::test_urls(preset).is_empty() {
+                if dr >= 4 && dr * 3 >= dd && cooled(preset) && !autotune::urls_for(preset, &settings).is_empty() {
                     target = Some(preset.clone());
                     break;
                 }
             }
             prev = now_h;
+            if target.is_none() && last_watch.elapsed() > Duration::from_secs(5 * 60) {
+                last_watch = Instant::now();
+                target = watch_presets(&settings).into_iter().find(|p| cooled(p));
+            }
             if let Some(preset) = target {
                 if state.autotune_running.swap(true, Ordering::SeqCst) {
                     continue;
@@ -468,6 +493,28 @@ fn spawn_healer(app: AppHandle) {
             }
         }
     });
+}
+
+/// Пресеты, у которых сейчас открывается меньше половины адресов проверки.
+fn watch_presets(settings: &Settings) -> Vec<String> {
+    #[cfg(windows)]
+    let iface = platform::windivert::direct_source_ip();
+    #[cfg(not(windows))]
+    let iface: Option<String> = None;
+    settings
+        .enabled_presets
+        .iter()
+        .filter(|p| {
+            let urls = autotune::urls_for(p, settings);
+            if urls.is_empty() {
+                return false;
+            }
+            let urls: Vec<&str> = urls.iter().map(String::as_str).collect();
+            let (ok, _, _) = autotune::check_all(&urls, iface.as_deref());
+            ok * 2 < urls.len()
+        })
+        .cloned()
+        .collect()
 }
 
 #[derive(Serialize)]
@@ -593,7 +640,7 @@ fn dev_check(state: State<AppState>, preset: String, strategy: Strategy) -> Resu
     custom.push(proryv_core::config::CustomStrategy { strategy: strategy.clone(), zapret: String::new(), enabled: true, result: None });
     base::set_custom(&custom);
     let was_running = is_running(&state);
-    stop_engine(&state);
+    state.engine.lock().unwrap().pause();
     let res = autotune::check_one(&preset, &strategy.id, &settings);
     base::set_custom(&settings.custom_strategies);
     if was_running {
@@ -624,6 +671,55 @@ fn isp_info() -> IspInfo {
         base_version: base::base().map_or(0, |b| b.version),
         done: BASE_DONE.load(Ordering::SeqCst),
     }
+}
+
+/// Отчёт для помощи в Discord: версия, система, провайдер, пресеты, ошибки и проверка сайтов.
+/// Без личных данных: ни IP, ни своих доменов, ни имён адаптеров.
+#[tauri::command(async)]
+fn diag_report(state: State<AppState>) -> String {
+    let settings = state.settings.lock().unwrap().clone();
+    let status = state.engine.lock().unwrap().status();
+    let en = is_en(&state);
+    let tr = |ru: &'static str, e: &'static str| if en { e } else { ru };
+    let winver = hidden_cmd("cmd").args(["/C", "ver"]).output().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
+    let mut r = vec![
+        format!("Proryv {} · {winver}", proryv_core::APP_VERSION),
+        format!("{}: {}", tr("Права администратора", "Administrator"), if is_elevated() { tr("да", "yes") } else { tr("нет", "no") }),
+        match base::isp() {
+            Some(i) => format!("{}: {} (AS{})", tr("Провайдер", "Provider"), i.name, i.asn),
+            None => tr("Провайдер: не определён", "Provider: unknown").into(),
+        },
+        format!("{}: v{}", tr("База стратегий", "Strategy base"), base::base().map_or(0, |b| b.version)),
+        format!("{}: {:?}{}", tr("Обход", "Bypass"), status.state, status.message.as_ref().map(|m| format!(" — {m}")).unwrap_or_default()),
+        format!("{} {} · {} {} · {} {}", tr("Соединений:", "Connections:"), status.stats.connections, tr("обработано:", "processed:"), status.stats.desynced, tr("фейков:", "fakes:"), status.stats.fakes_sent),
+        format!("{}: {} · QUIC: {} · Game Filter: {}", tr("Свои домены", "Custom domains"), settings.custom_domains.len(), settings.block_quic, settings.game_filter),
+    ];
+    let conflicts = check_conflicts();
+    r.push(format!("{}: {}", tr("Конфликты", "Conflicts"), if conflicts.is_empty() { tr("нет", "none").into() } else { conflicts.iter().map(|c| c.name.clone()).collect::<Vec<_>>().join(", ") }));
+    r.push(format!("{}: {}", tr("VPN-туннелей", "VPN tunnels"), tunnel_interfaces().len()));
+    #[cfg(windows)]
+    let iface = platform::windivert::direct_source_ip();
+    #[cfg(not(windows))]
+    let iface: Option<String> = None;
+    r.push(format!("{}: {}", tr("Проверка напрямую мимо VPN", "Direct check bypassing VPN"), if iface.is_some() { tr("да", "yes") } else { tr("нет", "no") }));
+    let all = base::strategies();
+    for p in &settings.enabled_presets {
+        let chosen = settings.strategy_override.iter().find(|(id, _)| id == p).map(|(_, s)| s.clone());
+        let sid = chosen.clone().or_else(|| base::presets().into_iter().find(|x| &x.id == p).and_then(|x| x.strategies.first().cloned())).unwrap_or_default();
+        let name = all.iter().find(|s| s.id == sid).map_or(sid.clone(), |s| s.name.clone());
+        let urls = if p == "universal" { vec![] } else { autotune::urls_for(p, &settings) };
+        let check = if urls.is_empty() {
+            String::new()
+        } else {
+            let u: Vec<&str> = urls.iter().map(String::as_str).collect();
+            let (ok, _, checks) = autotune::check_all(&u, iface.as_deref());
+            let fails: Vec<String> = checks.iter().filter(|c| !c.ok).map(|c| format!("{} (curl {})", c.url.split('/').nth(2).unwrap_or(""), c.curl_error)).collect();
+            format!(" · {} {ok}/{}{}", tr("открылось", "opened"), urls.len(), if fails.is_empty() { String::new() } else { format!(" · {}: {}", tr("не открылись", "failed"), fails.join(", ")) })
+        };
+        r.push(format!("[{p}] {name}{}{check}", if chosen.is_some() { "" } else { tr(" (авто)", " (auto)") }));
+    }
+    r.join("
+")
 }
 
 #[tauri::command]
@@ -766,6 +862,77 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
     Ok(())
 }
 
+/// Значок в трее с цветной точкой: зелёная — обход работает, красная — ошибка, без точки — выключен.
+fn tray_icon(base: &tauri::image::Image<'_>, state: EngineState) -> tauri::image::Image<'static> {
+    let (w, h) = (base.width(), base.height());
+    let mut rgba = base.rgba().to_vec();
+    let color = match state {
+        EngineState::Running => Some([0x6c, 0xcb, 0x5f]),
+        EngineState::Error => Some([0xff, 0x5a, 0x5a]),
+        _ => None,
+    };
+    if let Some(c) = color {
+        let r = w.min(h) as f32 * 0.24;
+        let (cx, cy) = (w as f32 - r - 0.5, h as f32 - r - 0.5);
+        for y in 0..h {
+            for x in 0..w {
+                let d = ((x as f32 + 0.5 - cx).powi(2) + (y as f32 + 0.5 - cy).powi(2)).sqrt();
+                let i = ((y * w + x) * 4) as usize;
+                if d <= r {
+                    rgba[i..i + 4].copy_from_slice(&[c[0], c[1], c[2], 255]);
+                } else if d <= r + 1.5 * (w as f32 / 32.0).max(1.0) {
+                    rgba[i..i + 4].copy_from_slice(&[0, 0, 0, 255]);
+                }
+            }
+        }
+    }
+    tauri::image::Image::new_owned(rgba, w, h)
+}
+
+fn spawn_tray_watch(app: AppHandle) {
+    std::thread::spawn(move || {
+        let Some(base) = app.default_window_icon().cloned() else { return };
+        let mut last = None;
+        loop {
+            let st = app.state::<AppState>().engine.lock().unwrap().status().state;
+            if last != Some(st) {
+                if let Some(tray) = app.tray_by_id("main") {
+                    let en = is_en(&app.state::<AppState>());
+                    let tip = match (st, en) {
+                        (EngineState::Running, false) => "Proryv — обход включён",
+                        (EngineState::Running, true) => "Proryv — bypass on",
+                        (EngineState::Error, false) => "Proryv — ошибка",
+                        (EngineState::Error, true) => "Proryv — error",
+                        (_, false) => "Proryv — выключен",
+                        (_, true) => "Proryv — off",
+                    };
+                    let _ = tray.set_icon(Some(tray_icon(&base, st)));
+                    let _ = tray.set_tooltip(Some(tip));
+                }
+                last = Some(st);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+        }
+    });
+}
+
+/// Настройки лежат рядом с Proryv.exe (их можно унести вместе с программой).
+/// Старые из AppData переносятся один раз. Если в папку программы писать нельзя — остаёмся в AppData.
+fn settings_location(app_dir: &std::path::Path) -> PathBuf {
+    let legacy = app_dir.join("settings.json");
+    let Some(dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(PathBuf::from)) else { return legacy };
+    let local = dir.join("settings.json");
+    if local.exists() {
+        return local;
+    }
+    let data = std::fs::read(&legacy).unwrap_or_else(|_| serde_json::to_vec_pretty(&Settings::default()).expect("settings"));
+    if std::fs::write(&local, data).is_ok() {
+        local
+    } else {
+        legacy
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let autostarted = std::env::args().any(|a| a == "--autostart");
@@ -773,7 +940,7 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_notification::init())
         .setup(move |app| {
-            let settings_path = app.path().app_config_dir()?.join("settings.json");
+            let settings_path = settings_location(&app.path().app_config_dir()?);
             let settings = Settings::load(&settings_path);
             if let Some(window) = app.get_webview_window("main") {
                 apply_backdrop(&window, &settings.backdrop);
@@ -799,6 +966,7 @@ pub fn run() {
                 start_engine_notify(app.handle());
             }
             spawn_healer(app.handle().clone());
+            spawn_tray_watch(app.handle().clone());
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -828,6 +996,7 @@ pub fn run() {
             relaunch_as_admin,
             tg_info,
             tg_open,
+            diag_report,
             tg_test,
             check_update,
             install_update,

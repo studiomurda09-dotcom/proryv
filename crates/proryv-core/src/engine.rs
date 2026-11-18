@@ -133,6 +133,7 @@ impl RunConfig {
             game_tcp: self.game_tcp,
             game_udp: self.game_udp,
             game_nets: self.game_nets.clone(),
+            syn_ack: self.rules.iter().any(|r| r.strategy.steps.iter().any(|s| matches!(s, Desync::AutoTtl { .. }))),
         }
     }
 
@@ -218,6 +219,8 @@ pub struct Processor {
     flows: HashMap<(u8, bool, u16, u16, u128), (u32, Instant)>,
     /// Недавние ClientHello: (v6, sport, dport, seq) — чтобы ловить повторы (самолечение).
     recent: HashMap<(bool, u16, u16, u32), Instant>,
+    /// autottl: TTL из SYN-ACK по адресу сервера.
+    server_ttl: HashMap<u128, (u8, Instant)>,
     packets: u64,
     seed: u64,
     pub trace: Option<Trace>,
@@ -267,7 +270,7 @@ impl Processor {
         }
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
         let seed = now.as_nanos() as u64 ^ 0x2545_f491_4f6c_dd1d ^ std::process::id() as u64;
-        Processor { cfg, stats, held: HeldMap::default(), flows: HashMap::new(), recent: HashMap::new(), packets: 0, seed, trace: None }
+        Processor { cfg, stats, held: HeldMap::default(), flows: HashMap::new(), recent: HashMap::new(), server_ttl: HashMap::new(), packets: 0, seed, trace: None }
     }
 
     fn flow_index(&mut self, key: (u8, bool, u16, u16, u128), now: Instant) -> u32 {
@@ -286,6 +289,7 @@ impl Processor {
         if self.packets % 2048 == 0 {
             self.flows.retain(|_, v| now - v.1 < Duration::from_secs(120));
             self.recent.retain(|_, t| now - *t < Duration::from_secs(20));
+            self.server_ttl.retain(|_, v| now - v.1 < Duration::from_secs(600));
         }
     }
 
@@ -367,6 +371,12 @@ impl Processor {
             return out;
         }
         self.housekeeping(now);
+        // Входящий SYN-ACK перехватываем только ради autottl: запомнить TTL и отпустить.
+        if let Some((ip, ttl)) = packet::syn_ack_ttl(pkt) {
+            self.server_ttl.insert(ip, (ttl, now));
+            out.push(pass(pkt, addr));
+            return out;
+        }
         if let Some(u) = packet::parse_udp(pkt) {
             out.extend(self.handle_udp(pkt, addr, u, now));
             return out;
@@ -444,7 +454,23 @@ impl Processor {
             retrans
         };
         self.seed = self.seed.wrapping_mul(6364136223846793005).wrapping_add(info.seq as u64 | 1);
-        let plan = strategy::plan(payload, &rule.strategy, self.seed);
+        let mut plan = strategy::plan(payload, &rule.strategy, self.seed);
+        let auto = rule.strategy.steps.iter().find_map(|s| match s {
+            Desync::AutoTtl { delta, min, max } => Some((*delta, *min, *max)),
+            _ => None,
+        });
+        if let Some((delta, min, max)) = auto {
+            let seen = packet::dst_ip(pkt).and_then(|ip| self.server_ttl.get(&ip)).map(|v| v.0);
+            if let Some(observed) = seen {
+                let ttl = strategy::auto_ttl(observed, delta, min, max);
+                for s in plan.segments.iter_mut().filter(|s| s.kind == SegKind::Fake) {
+                    s.ttl = Some(ttl);
+                }
+                self.log(|| format!("autottl: ответ с TTL {observed} → фейкам TTL {ttl}"));
+            } else {
+                self.log(|| "autottl: SYN-ACK не видели — фейки без поправки TTL".into());
+            }
+        }
 
         let segs = split_oversized(plan.segments);
         self.log(|| {
@@ -556,9 +582,13 @@ pub struct Engine {
 
 impl Engine {
     pub fn start(&mut self, cfg: RunConfig, io: Arc<dyn PacketIo>) {
+        // Перезапуск с новыми настройками — продолжение той же сессии: время и счётчики не сбрасываем.
+        let resumed = self.started.filter(|_| self.error.lock().unwrap().is_none());
         self.stop();
         *self.error.lock().unwrap() = None;
-        self.stats = Arc::new(Counters::default());
+        if resumed.is_none() {
+            self.stats = Arc::new(Counters::default());
+        }
         self.presets = cfg.rules.iter().map(|r| r.preset_id.clone()).collect();
         let mut proc = Processor::new(cfg, self.stats.clone());
         proc.trace = self.trace.clone();
@@ -586,7 +616,14 @@ impl Engine {
                 .expect("spawn engine"),
         );
         self.io = Some(io);
-        self.started = Some(Instant::now());
+        self.started = Some(resumed.unwrap_or_else(Instant::now));
+    }
+
+    /// Остановить на время (автоподбор): следующий `start` продолжит ту же сессию.
+    pub fn pause(&mut self) {
+        let started = self.started;
+        self.stop();
+        self.started = started;
     }
 
     pub fn fail(&mut self, message: String) {

@@ -78,6 +78,7 @@ const mockBackend = (() => {
     set_enabled: ({ enabled: e }) => { enabled = e; started = Date.now(); return status(); },
     preview_plan: ({ host, strategyId }) => plan(host, M.strategies.find((s) => s.id === strategyId)),
     check_conflicts: () => [{ process: 'winws.exe', name: 'zapret (пример в браузере)' }],
+    diag_report: () => ['Proryv ' + M.version + ' · Microsoft Windows [Version 10.0.26200]', 'Провайдер: Example Telecom (AS64512)', 'Обход: Running', '[youtube] Fake TS + Overlap (ALT11) · открылось 4/4'].join('\n'),
     default_settings: () => ({ ...M.defaults }),
     tunnel_interfaces: () => ['sing-tun Tunnel (пример)'],
     tg_info: () => ({ enabled: !!(load() || {}).telegram, running: !!(load() || {}).telegram,
@@ -99,7 +100,7 @@ const mockBackend = (() => {
     dev_log: ({ since }) => {
       const hosts = ['rr3---sn-4g5e6nsz.googlevideo.com', 'i.ytimg.com', 'gateway.discord.gg', 'www.youtube.com'];
       const n = enabled && Math.random() < 0.6 ? 1 : 0;
-      return [since + n, n ? [`${hosts[since % 4]} → youtube / ALT11: фейки (ts) + наложение · 8 фейков + 2 части`] : []];
+      return [since + n, n ? [`${hosts[since % 4]} → youtube / Fake TS + Overlap (ALT11) · 8 фейков + 2 части`] : []];
     },
     dev_check: () => [6, 6],
     install_update: () => { throw 'в браузере обновление недоступно'; },
@@ -137,8 +138,8 @@ const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&l
 
 const ACCENTS = ['#7cc4e4', '#9fb4a3', '#a78bfa', '#f472b6', '#fb923c', '#facc15', '#4ade80', '#60a5fa'];
 const PAGE_TITLES = {
-  home: 'Главная', presets: 'Пресеты', strategies: 'Стратегии', autotune: 'Автоподбор', domains: 'Списки доменов',
-  diag: 'Диагностика', appearance: 'Внешний вид', general: 'Общие настройки', dev: 'Разработчик', about: 'О программе',
+  home: 'Главная', presets: 'Пресеты', strategies: 'Стратегии', autotune: 'Автоподбор', domains: 'Списки',
+  diag: 'Диагностика', general: 'Настройки', dev: 'Разработчик', about: 'О программе',
 };
 
 const state = { saved: null, settings: null, presets: [], strategies: [], status: null, busy: false };
@@ -153,6 +154,15 @@ function applyLook() {
   document.documentElement.style.setProperty('--accent', s.accent);
   document.documentElement.style.setProperty('--accent-fg', contrastText(s.accent));
   document.body.classList.toggle('no-anim', !s.animations);
+  document.body.classList.remove('theme-light', 'theme-black');
+  if (s.theme === 'light' || s.theme === 'black') document.body.classList.add('theme-' + s.theme);
+  const img = s.bg_image || '';
+  document.body.classList.toggle('has-bg', !!img);
+  document.body.style.setProperty('--bg-image', img ? `url("${img}")` : 'none');
+  document.body.style.setProperty('--bg-dim', String((s.bg_dim ?? 60) / 100));
+  $('#bg-dim-row').classList.toggle('hidden', !img);
+  $('#bg-clear').classList.toggle('hidden', !img);
+  $('#bg-dim-val').textContent = (s.bg_dim ?? 60) + '%';
   document.body.classList.remove('backdrop-mica', 'backdrop-acrylic', 'sim-backdrop');
   if (s.backdrop !== 'none') {
     document.body.classList.add('backdrop-' + s.backdrop);
@@ -173,11 +183,19 @@ function syncControls() {
   applyLook();
   applyDevMode();
 }
-function markDirty() {
-  const dirty = JSON.stringify(state.settings) !== JSON.stringify(state.saved);
-  $('#dirty').classList.toggle('hidden', !dirty);
-  $('#btn-save').disabled = !dirty;
-  $('#btn-revert').disabled = !dirty;
+/* Настройки сохраняются сами через мгновение после изменения — без кнопки «Сохранить». */
+let saveTimer;
+function markDirty(delay = 600) {
+  renderListCounts();
+  clearTimeout(saveTimer);
+  if (JSON.stringify(state.settings) === JSON.stringify(state.saved)) return;
+  saveTimer = setTimeout(() => save().catch((e) => toast('Не удалось сохранить: ' + e)), delay);
+}
+function renderListCounts() {
+  const s = state.settings;
+  $('#cnt-custom').textContent = s.custom_domains.length;
+  $('#cnt-exclude').textContent = s.excluded_domains.length;
+  $('#cnt-games').textContent = s.game_ips.length;
 }
 function setSetting(key, value) {
   state.settings[key] = value;
@@ -189,13 +207,13 @@ function setSetting(key, value) {
 function bindSettings() {
   document.addEventListener('change', (e) => {
     const el = e.target;
-    if (el.dataset.setting) setSetting(el.dataset.setting, el.type === 'checkbox' ? el.checked : el.value);
+    if (el.dataset.setting) setSetting(el.dataset.setting, el.type === 'checkbox' ? el.checked : el.type === 'range' ? +el.value : el.value);
   });
   document.addEventListener('input', (e) => {
     const el = e.target;
     if (el.dataset.settingList) {
       state.settings[el.dataset.settingList] = el.value.split('\n').map((x) => x.trim()).filter(Boolean);
-      markDirty();
+      markDirty(1500);
     }
   });
   $$('[data-accent-picker]').forEach((box) => {
@@ -360,7 +378,7 @@ async function renderConflicts() {
 }
 
 /* ---------- Автоподбор ---------- */
-const AT_PRESETS = ['youtube', 'discord', 'general', 'roblox', 'social'];
+const AT_PRESETS = ['youtube', 'discord', 'general', 'roblox', 'social', 'universal'];
 let atRunning = false;
 function renderAutotunePresets() {
   const sel = $('#at-preset'), cur = sel.value;
@@ -569,9 +587,94 @@ function importSettings() {
       if (typeof obj !== 'object' || !obj || !Array.isArray(obj.enabled_presets)) { toast('Это не похоже на настройки Proryv'); return false; }
       state.settings = { ...state.settings, ...obj, first_run_done: true };
       syncControls(); renderPresets(); renderHero(); markDirty();
-      toast('Импортировано — нажмите «Сохранить»');
+      toast('Настройки импортированы');
     },
   });
+}
+
+/* ---------- Списки ---------- */
+function bindLists() {
+  $('#list-tabs').addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-list]');
+    if (!b) return;
+    $$('#list-tabs button').forEach((x) => x.classList.toggle('sel', x === b));
+    $$('.list-pane').forEach((p) => p.classList.toggle('hidden', p.dataset.list !== b.dataset.list));
+  });
+}
+/* Поиск по настройкам может вести в скрытую вкладку списков — открываем её. */
+function revealListPane(el) {
+  const pane = el.closest('.list-pane');
+  if (pane) $(`#list-tabs button[data-list="${pane.dataset.list}"]`).click();
+}
+
+/* ---------- «Не открывается сайт» ---------- */
+function cleanHost(v) {
+  return v.trim().toLowerCase().replace(/^[a-z]+:\/\//, '').split(/[/?#:]/)[0].replace(/^www\./, '');
+}
+async function tunePreset(preset) {
+  if (preset === 'universal' && !state.settings.custom_domains.length) {
+    toast('Сначала добавьте сайты в «Свои домены»');
+    return;
+  }
+  if (!state.settings.enabled_presets.includes(preset)) {
+    state.settings.enabled_presets = [...state.settings.enabled_presets, preset];
+    renderPresets(); renderHero();
+  }
+  await save();
+  showPage('autotune');
+  renderAutotunePresets();
+  $('#at-preset').value = preset;
+  startAutotune();
+}
+async function fixSite() {
+  const host = cleanHost($('#fix-host').value);
+  if (!/^[a-z0-9.-]+\.[a-z0-9-]{2,}$/.test(host)) { toast('Введите адрес сайта, например rutracker.org'); return; }
+  if (!state.settings.custom_domains.includes(host)) state.settings.custom_domains = [...state.settings.custom_domains, host];
+  syncControls();
+  $('#fix-host').value = '';
+  toast(`${host} добавлен в «Свои домены» — подбираем обход…`);
+  tunePreset('universal');
+}
+
+/* ---------- Отчёт для помощи ---------- */
+async function diagReport() {
+  const b = $('#diag-report');
+  b.disabled = true; b.textContent = 'Собираем…';
+  try {
+    const text = await call('diag_report');
+    openModal({
+      title: 'Отчёт для помощи', sub: 'Скопируйте и отправьте в Discord. IP-адресов и ваших доменов здесь нет.',
+      text, ok: 'Скопировать', readonly: true,
+      onOk: async (t) => {
+        try { await navigator.clipboard.writeText(t); } catch { $('#modal-text').select(); document.execCommand('copy'); }
+        toast('Скопировано');
+      },
+    });
+  } catch (e) { toast(String(e)); }
+  b.disabled = false; b.textContent = 'Собрать отчёт';
+}
+
+/* ---------- Картинка на фоне ---------- */
+function bindBackground() {
+  $('#bg-pick').onclick = () => $('#bg-file').click();
+  $('#bg-clear').onclick = () => setSetting('bg_image', '');
+  $('#bg-file').onchange = (e) => {
+    const file = e.target.files[0];
+    e.target.value = '';
+    if (!file) return;
+    const img = new Image();
+    img.onload = () => {
+      // Уменьшаем до 1920 px и сжимаем в JPEG, чтобы файл настроек оставался маленьким.
+      const k = Math.min(1, 1920 / Math.max(img.width, img.height));
+      const c = document.createElement('canvas');
+      c.width = Math.round(img.width * k); c.height = Math.round(img.height * k);
+      c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+      URL.revokeObjectURL(img.src);
+      setSetting('bg_image', c.toDataURL('image/jpeg', 0.82));
+    };
+    img.onerror = () => toast('Не удалось открыть картинку');
+    img.src = URL.createObjectURL(file);
+  };
 }
 
 /* ---------- Мастер ---------- */
@@ -608,10 +711,10 @@ function bindWizard() {
 
 /* ---------- Сохранение ---------- */
 async function save() {
-  await call('save_settings', { settings: state.settings });
-  state.saved = structuredClone(state.settings);
-  markDirty();
-  toast('Настройки сохранены');
+  clearTimeout(saveTimer);
+  const snapshot = structuredClone(state.settings);
+  await call('save_settings', { settings: snapshot });
+  state.saved = snapshot;
   setTimeout(renderTg, 300);
 }
 let toastTimer;
@@ -888,6 +991,7 @@ function openSearchHit(i) {
   if (!h) return;
   closeSearch();
   showPage(h.pid);
+  revealListPane(h.el);
   requestAnimationFrame(() => {
     h.el.scrollIntoView({ block: 'center', behavior: state.settings.animations ? 'smooth' : 'auto' });
     h.el.classList.remove('found'); void h.el.offsetWidth; h.el.classList.add('found');
@@ -938,7 +1042,6 @@ function bindWindow() {
   $('#win-max').onclick = () => win && win.toggleMaximize();
   const close = () => (win ? win.close() : toast('В браузере окно не закрыть'));
   $('#win-close').onclick = close;
-  $('#btn-close').onclick = close;
   $('#btn-sidebar').onclick = () => $('#app').classList.toggle('collapsed');
 }
 
@@ -956,15 +1059,19 @@ async function init() {
 
   $$('.sidebar a').forEach((a) => (a.onclick = () => showPage(a.dataset.page)));
   $('#power').onclick = togglePower;
-  $('#btn-save').onclick = save;
-  $('#btn-revert').onclick = () => { state.settings = structuredClone(state.saved); syncControls(); renderPresets(); renderHero(); markDirty(); };
   $('#act-wizard').onclick = () => showWizard(true);
   $('#act-reset').onclick = async () => {
+    if (!confirm(t('Сбросить все настройки, списки и свои стратегии?'))) return;
     const d = await call('default_settings');
     state.settings = { ...d, first_run_done: true };
-    syncControls(); renderPresets(); renderHero(); markDirty();
-    toast('Настройки сброшены — нажмите «Сохранить»');
+    syncControls(); renderPresets(); renderHero(); markDirty(0);
+    toast('Настройки сброшены');
   };
+  bindLists(); bindBackground();
+  $('#fix-run').onclick = fixSite;
+  $('#fix-host').addEventListener('keydown', (e) => e.key === 'Enter' && fixSite());
+  $('#custom-tune').onclick = () => tunePreset('universal');
+  $('#diag-report').onclick = diagReport;
   $('#act-import').onclick = importSettings;
   $('#act-export').onclick = exportSettings;
   $('#at-start').onclick = startAutotune;

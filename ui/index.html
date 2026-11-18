@@ -95,11 +95,10 @@
       <a data-page="presets" data-icon="layers">Пресеты</a>
       <a data-page="strategies" data-icon="zap">Стратегии</a>
       <a data-page="autotune" data-icon="wand">Автоподбор</a>
-      <a data-page="domains" data-icon="list">Списки доменов</a>
+      <a data-page="domains" data-icon="list">Списки</a>
       <a data-page="diag" data-icon="activity">Диагностика</a>
       <hr />
-      <a data-page="appearance" data-icon="palette">Внешний вид</a>
-      <a data-page="general" data-icon="settings">Общие настройки</a>
+      <a data-page="general" data-icon="settings">Настройки</a>
       <a data-page="dev" data-icon="code" class="hidden" id="nav-dev">Разработчик <span class="badge">DEV</span></a>
       <div class="grow"></div>
       <a data-page="about" data-icon="info">О программе</a>
@@ -132,6 +131,14 @@
           <div class="card stat"><small>Обработано</small><b id="st-desync">0</b></div>
           <div class="card stat"><small>Фейков отправлено</small><b id="st-fakes">0</b></div>
         </div>
+        <h2>Не открывается сайт?</h2>
+        <div class="card fix-site" data-keywords="не открывается сайт починить подобрать добавить домен">
+          <div class="row gap">
+            <input id="fix-host" placeholder="Например: rutracker.org" spellcheck="false" />
+            <button class="btn accent" id="fix-run">Починить</button>
+          </div>
+          <small>Proryv добавит сайт в «Свои домены» и подберёт обход, который откроет его вместе с остальными вашими сайтами.</small>
+        </div>
         <h2>Провайдер</h2>
         <div class="card row" data-keywords="провайдер isp asn">
           <div><b id="isp-name">Определяем провайдера…</b><small id="isp-sub">Для «Авто» берутся стратегии, которые сработали у других пользователей этого провайдера.</small></div>
@@ -162,18 +169,6 @@
               <div class="mono" id="tg-test-out"></div>
             </div>
           </div>
-          <div class="card row" data-keywords="игры игровой фильтр роблокс roblox гейм"><div><b>Game Filter</b><small>Обход для игр: фейки перед первыми пакетами соединения к игровым серверам (порты 1024–65535). Как одноимённый режим в zapret.</small></div>
-            <select data-setting="game_filter">
-              <option value="off">Выключен</option>
-              <option value="udp">Только UDP</option>
-              <option value="tcp">Только TCP</option>
-              <option value="all">TCP и UDP</option>
-            </select></div>
-          <div class="card">
-            <b>Игровые серверы (диапазоны IP)</b>
-            <small>По одному на строку, формат <span class="mono">128.116.0.0/17</span> или <span class="mono">2620:2b::/40</span>. По умолчанию — серверы Roblox. Game Filter действует только на эти адреса, чтобы не трогать остальной трафик.</small>
-            <textarea data-setting-list="game_ips" rows="4" style="margin-top:10px" placeholder="128.116.0.0/17"></textarea>
-          </div>
         </div>
       </section>
 
@@ -203,20 +198,51 @@
         <div class="cards hidden" id="at-results"></div>
         <div class="card at-summary hidden" id="at-summary"></div>
         <div class="cards">
-          <div class="card row"><div><b>Самолечение</b><small>Proryv следит за соединениями: если по пресету много повторных попыток (сайт перестал открываться), он сам переподберёт стратегию — не чаще раза в 15 минут.</small></div><label class="toggle"><input type="checkbox" data-setting="auto_heal"><i></i></label></div>
+          <div class="card row" data-keywords="сторож самолечение проверка"><div><b>Самолечение и сторож</b><small>Proryv следит за соединениями и раз в 5 минут сам проверяет сайты включённых пресетов. Если сайт перестал открываться — переподберёт стратегию (не чаще раза в 15 минут) и пришлёт уведомление.</small></div><label class="toggle"><input type="checkbox" data-setting="auto_heal"><i></i></label></div>
           <div class="card row"><div><b>Случайные фейки</b><small>Каждый фейк со случайным именем сайта и разрезом — DPI не сможет поймать их по шаблону.</small></div><label class="toggle"><input type="checkbox" data-setting="random_fakes"><i></i></label></div>
         </div>
       </section>
 
       <!-- Домены -->
       <section class="page" data-page="domains">
-        <h1>Списки доменов</h1>
-        <p class="sub">По одному домену на строку. Поддомены включаются автоматически.</p>
-        <h2>Свои домены</h2>
-        <textarea data-setting-list="custom_domains" rows="8" placeholder="example.com&#10;rutracker.org"></textarea>
-        <h2>Исключения</h2>
-        <p class="sub">Эти сайты никогда не обрабатываются. Банки, Госуслуги, Яндекс, VK, маркетплейсы и игры с античитом (~150 доменов) уже исключены встроенным списком — сюда добавляйте свои.</p>
-        <textarea data-setting-list="excluded_domains" rows="5" placeholder="sberbank.ru"></textarea>
+        <h1>Списки</h1>
+        <p class="sub">По одному адресу на строку. Поддомены включаются автоматически. Изменения сохраняются сами.</p>
+        <div class="list-tabs" id="list-tabs">
+          <button data-list="custom" class="sel">Свои домены</button>
+          <button data-list="exclude">Исключения</button>
+          <button data-list="games">Игры (IP)</button>
+        </div>
+        <div class="list-pane" data-list="custom">
+          <div class="card" data-keywords="свои домены сайты список">
+            <div class="head2"><b>Свои домены</b><span class="tag" id="cnt-custom">0</span><div class="grow"></div>
+              <button class="btn mini" id="custom-tune">Подобрать обход для них</button></div>
+            <small>Работают, когда включён пресет «Свои домены». Автоподбор ищет один обход, который открывает их все.</small>
+            <textarea data-setting-list="custom_domains" rows="10" placeholder="example.com&#10;rutracker.org"></textarea>
+          </div>
+        </div>
+        <div class="list-pane hidden" data-list="exclude">
+          <div class="card" data-keywords="исключения банки не трогать">
+            <div class="head2"><b>Исключения</b><span class="tag" id="cnt-exclude">0</span></div>
+            <small>Эти сайты никогда не обрабатываются. Банки, Госуслуги, Яндекс, VK, маркетплейсы и игры с античитом (~150 доменов) уже исключены встроенным списком — сюда добавляйте свои.</small>
+            <textarea data-setting-list="excluded_domains" rows="10" placeholder="sberbank.ru"></textarea>
+          </div>
+        </div>
+        <div class="list-pane hidden" data-list="games">
+          <div class="cards">
+          <div class="card row" data-keywords="игры игровой фильтр роблокс roblox гейм"><div><b>Game Filter</b><small>Обход для игр: фейки перед первыми пакетами соединения к игровым серверам (порты 1024–65535). Как одноимённый режим в zapret.</small></div>
+            <select data-setting="game_filter">
+              <option value="off">Выключен</option>
+              <option value="udp">Только UDP</option>
+              <option value="tcp">Только TCP</option>
+              <option value="all">TCP и UDP</option>
+            </select></div>
+          <div class="card" data-keywords="игровые серверы ip диапазоны cidr roblox">
+            <div class="head2"><b>Игровые серверы (диапазоны IP)</b><span class="tag" id="cnt-games">0</span></div>
+            <small>По одному на строку, формат <span class="mono">128.116.0.0/17</span> или <span class="mono">2620:2b::/40</span>. По умолчанию — серверы Roblox. Game Filter действует только на эти адреса, чтобы не трогать остальной трафик.</small>
+            <textarea data-setting-list="game_ips" rows="8" placeholder="128.116.0.0/17"></textarea>
+          </div>
+          </div>
+        </div>
       </section>
 
       <!-- Диагностика -->
@@ -228,25 +254,12 @@
           <button class="btn accent" id="diag-run">Проверить</button>
         </div>
         <div class="card diag-out hidden" id="diag-out"></div>
-        <div class="card row" data-keywords="дискорд discord помощь поддержка"><div><b>Не помогло?</b><small>Напишите в Discord: название провайдера и что не открывается — подскажем стратегию.</small></div><button class="btn" data-discord>Discord</button></div>
+        <div class="card row" data-keywords="отчёт диагностика поддержка discord помощь"><div><b>Отчёт для помощи</b><small>Версия, провайдер, стратегии, ошибки и какие сайты не открываются — без IP и ваших доменов. Скопируйте и отправьте в Discord.</small></div><button class="btn" id="diag-report">Собрать отчёт</button><button class="btn" data-discord>Discord</button></div>
         <h2>Конфликты</h2>
         <div class="cards" id="conflicts"></div>
         <h2>VPN-туннели</h2>
         <p class="sub">Трафик через эти адаптеры Proryv не трогает — иначе ломается VPN.</p>
         <div class="cards" id="tunnels"></div>
-      </section>
-
-      <!-- Внешний вид -->
-      <section class="page" data-page="appearance">
-        <h1>Внешний вид</h1>
-        <div class="cards">
-          <div class="card row"><div><b>Фон окна</b><small>Требуется перезапуск. Mica работает только в Windows 11.</small></div>
-            <select data-setting="backdrop"><option value="mica">Mica</option><option value="acrylic">Acrylic</option><option value="none">Нет</option></select></div>
-          <div class="card row"><div><b>Акцентный цвет</b><small>Цвет переключателей, кнопок и индикаторов.</small></div><div class="swatches" data-accent-picker></div></div>
-          <div class="card row"><div><b>Анимации</b><small>Отключите для слабых ПК.</small></div><label class="toggle"><input type="checkbox" data-setting="animations"><i></i></label></div>
-          <div class="card row"><div><b>Язык</b><small>Язык интерфейса и уведомлений.</small></div>
-            <select data-setting="language"><option value="system">Как в системе</option><option value="ru">Русский</option><option value="en">English</option></select></div>
-        </div>
       </section>
 
       <!-- Общие -->
@@ -255,6 +268,22 @@
           <button class="card action" id="act-import"><span data-icon="download"></span>Импорт настроек</button>
           <button class="card action" id="act-reset"><span data-icon="rotate"></span>Сбросить настройки</button>
           <button class="card action" id="act-export"><span data-icon="upload"></span>Экспорт настроек</button>
+        </div>
+        <h1>Внешний вид</h1>
+        <div class="cards">
+          <div class="card row" data-keywords="тема светлая тёмная чёрная"><div><b>Тема</b><small>Светлая, тёмная или чёрная (для OLED-экранов).</small></div>
+            <select data-setting="theme"><option value="dark">Тёмная</option><option value="light">Светлая</option><option value="black">Чёрная</option></select></div>
+          <div class="card row" data-keywords="фон картинка обои изображение"><div><b>Картинка на фоне</b><small>Своя картинка под интерфейсом. Хранится в настройках — исходный файл можно удалить.</small></div>
+            <button class="btn" id="bg-pick">Выбрать…</button><button class="btn" id="bg-clear">Убрать</button>
+            <input type="file" id="bg-file" accept="image/*" hidden></div>
+          <div class="card row" id="bg-dim-row"><div><b>Затемнение картинки</b><small>Чтобы текст хорошо читался.</small></div>
+            <span class="mono" id="bg-dim-val"></span><input type="range" min="0" max="90" step="5" data-setting="bg_dim" class="range"></div>
+          <div class="card row"><div><b>Прозрачность окна</b><small>Mica и Acrylic работают только в Windows 11, нужен перезапуск.</small></div>
+            <select data-setting="backdrop"><option value="mica">Mica</option><option value="acrylic">Acrylic</option><option value="none">Нет</option></select></div>
+          <div class="card row"><div><b>Акцентный цвет</b><small>Цвет переключателей, кнопок и индикаторов.</small></div><div class="swatches" data-accent-picker></div></div>
+          <div class="card row"><div><b>Анимации</b><small>Отключите для слабых ПК.</small></div><label class="toggle"><input type="checkbox" data-setting="animations"><i></i></label></div>
+          <div class="card row"><div><b>Язык</b><small>Язык интерфейса и уведомлений.</small></div>
+            <select data-setting="language"><option value="system">Как в системе</option><option value="ru">Русский</option><option value="en">English</option></select></div>
         </div>
         <h1>Запуск</h1>
         <div class="cards">
@@ -324,11 +353,14 @@
           <div class="card">
             <div class="head2"><b>Шпаргалка по параметрам</b><div class="grow"></div><button class="btn mini" id="dev-docs">Полная документация bol-van ↗</button></div>
             <div class="cheat">
-              <code>--dpi-desync=</code><span>fake, multisplit, multidisorder, split, disorder — режимы через запятую</span>
+              <code>--dpi-desync=</code><span>fake, multisplit, multidisorder, split, disorder, fakedsplit, fakeddisorder, hostfakesplit — через запятую</span>
               <code>--dpi-desync-split-pos=</code><span>где резать: 1, host, endhost, midsld, sniext+1 (и midhost — только в Proryv)</span>
               <code>--dpi-desync-split-seqovl=</code><span>наложение: сколько байт фейка подложить перед данными</span>
               <code>--dpi-desync-split-seqovl-pattern=</code><span>файл tls_clienthello_САЙТ.bin — к какому сайту фейк наложения</span>
-              <code>--dpi-desync-fooling=</code><span>как обмануть сервер: ts, badseq, badsum, md5sig</span>
+              <code>--dpi-desync=fakedsplit</code><span>разрез + фейк той же длины вокруг каждого куска (fakeddisorder — куски задом наперёд)</span>
+              <code>--dpi-desync=hostfakesplit</code><span>имя сайта отдельным куском, вокруг — фейки с выдуманным именем</span>
+              <code>--dpi-desync-autottl=</code><span>TTL фейков по числу хопов до сервера: -1:3-20 (поправка:мин-макс)</span>
+              <code>--dpi-desync-fooling=</code><span>как обмануть сервер: ts, badseq, badsum, md5sig, datanoack</span>
               <code>--dpi-desync-ttl=</code><span>малый TTL фейка: пакет умрёт по дороге после DPI</span>
               <code>--dpi-desync-repeats=</code><span>сколько раз отправить фейк</span>
               <code>--dpi-desync-fake-tls=</code><span>файл tls_clienthello_САЙТ.bin — какой сайт в фейке</span>
@@ -355,13 +387,6 @@
       </section>
     </main>
 
-    <footer class="bottombar main-bar">
-      <span class="dirty hidden" id="dirty">Есть несохранённые изменения</span>
-      <div class="grow"></div>
-      <button class="btn" id="btn-revert">Отменить</button>
-      <button class="btn accent" id="btn-save">Сохранить</button>
-      <button class="btn" id="btn-close">Закрыть</button>
-    </footer>
   </div>
 
   <div class="modal hidden" id="modal">

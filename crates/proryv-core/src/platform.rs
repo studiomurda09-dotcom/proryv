@@ -16,6 +16,8 @@ pub enum PlatformError {
     DriverMissing(String),
     #[error("Windows заблокировала драйвер WinDivert ({0}). Проверьте антивирус и «Целостность памяти».")]
     DriverBlocked(String),
+    #[error("Драйвер перехвата уже занят другой программой (обычно служба zapret или GoodbyeDPI). Удалите её службу (в zapret: service.bat → Remove Services) и перезагрузите ПК.")]
+    DriverInUse,
     #[error("Перехват остановлен")]
     Shutdown,
     #[error("Ошибка перехвата: {0}")]
@@ -35,6 +37,8 @@ pub struct Filter {
     pub game_tcp: bool,
     pub game_udp: bool,
     pub game_nets: Vec<Net>,
+    /// Перехватывать входящие SYN-ACK (для autottl): TTL ответа = число хопов.
+    pub syn_ack: bool,
 }
 
 /// Диапазон адресов. IPv4 хранится как v4-mapped (`::ffff:a.b.c.d`),
@@ -151,6 +155,13 @@ pub const KNOWN_CONFLICTS: &[(&str, &str)] = &[
     ("clash-verge.exe", "Clash Verge (VPN)"),
     ("mihomo.exe", "Mihomo/Clash (VPN)"),
     ("amneziavpn.exe", "AmneziaVPN"),
+];
+
+/// Службы других обходов: держат свой WinDivert даже без открытого окна.
+pub const CONFLICT_SERVICES: &[(&str, &str)] = &[
+    ("zapret", "zapret (служба)"),
+    ("winws1", "zapret (служба)"),
+    ("goodbyedpi", "GoodbyeDPI (служба)"),
 ];
 
 #[cfg(test)]

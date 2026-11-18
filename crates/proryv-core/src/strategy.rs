@@ -52,6 +52,8 @@ pub enum Fooling {
     /// Уменьшить TCP timestamp: сервер отбросит пакет как старый (PAWS).
     /// Работает, только если в Windows включены TCP timestamps.
     Ts,
+    /// Снять флаг ACK: сервер отбросит сегмент с данными без ACK.
+    DataNoAck,
 }
 
 /// Какое имя сайта класть в фейковый ClientHello.
@@ -78,6 +80,29 @@ pub enum Desync {
     TlsRecordSplit { at: Pos },
     /// HTTP: «Host:» → «hoSt:».
     HostCase,
+    /// fakedsplit / fakeddisorder: разрезать в `at` и каждую часть окружить фейками
+    /// той же длины по тому же seq (нули + fooling). DPI не знает, какой кусок настоящий.
+    FakedSplit {
+        at: Pos,
+        ttl: u8,
+        fooling: Vec<Fooling>,
+        #[serde(default)]
+        disorder: bool,
+    },
+    /// hostfakesplit: имя сайта отдельным куском, вокруг него — фейки
+    /// с выдуманным именем той же длины.
+    HostFakeSplit { ttl: u8, fooling: Vec<Fooling> },
+    /// autottl: TTL всех фейков = число хопов до сервера + `delta` (хопы узнаём по SYN-ACK),
+    /// но в пределах [min, max]. Пока хопы неизвестны, фейки идут как есть.
+    AutoTtl { delta: i8, min: u8, max: u8 },
+}
+
+/// TTL фейка для autottl: по TTL ответа сервера угадываем начальный (64/128/255),
+/// разница — число хопов.
+pub fn auto_ttl(observed: u8, delta: i8, min: u8, max: u8) -> u8 {
+    let initial = [64u8, 128, 255].into_iter().find(|i| *i >= observed).unwrap_or(255);
+    let hops = (initial - observed) as i16;
+    (hops + delta as i16).clamp(min as i16, max.max(min) as i16) as u8
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -189,6 +214,14 @@ fn next_rand(seed: &mut u64) -> u64 {
     x
 }
 
+/// Выдуманное имя сайта той же длины: «qkzvbt.com» вместо «youtube.com».
+fn fake_host(len: usize, seed: &mut u64) -> Vec<u8> {
+    let tail: &[u8] = if len > 6 { b".com" } else { b"" };
+    let mut v: Vec<u8> = (0..len - tail.len()).map(|_| b'a' + (next_rand(seed) % 26) as u8).collect();
+    v.extend_from_slice(tail);
+    v
+}
+
 fn tls_record_split(p: &[u8], at: usize) -> Option<Vec<u8>> {
     let body_len = ((p[3] as usize) << 8) | p[4] as usize;
     if at <= 5 || at >= 5 + body_len || 5 + body_len > p.len() {
@@ -247,6 +280,14 @@ pub fn plan(original: &[u8], strategy: &Strategy, mut seed: u64) -> Plan {
             Desync::MultiDisorder { at } => {
                 cuts.extend(at.iter().filter_map(|p| resolve(*p, &ctx, len)));
                 disorder = true;
+            }
+            Desync::FakedSplit { at, disorder: d, .. } => {
+                cuts.extend(resolve(*at, &ctx, len));
+                disorder |= *d;
+            }
+            Desync::HostFakeSplit { .. } if ctx.host.is_some() => {
+                cuts.extend(resolve(Pos::at(Anchor::HostStart), &ctx, len));
+                cuts.extend(resolve(Pos::at(Anchor::HostEnd), &ctx, len));
             }
             _ => {}
         }
@@ -329,7 +370,42 @@ pub fn plan(original: &[u8], strategy: &Strategy, mut seed: u64) -> Plan {
             }
         }
     }
-    segments.extend(real);
+    // 6. fakedsplit / hostfakesplit: фейк той же длины до и после настоящего куска.
+    let mut out = Vec::with_capacity(real.len() * 3);
+    for seg in real {
+        let mut wrap = None;
+        for step in &strategy.steps {
+            match step {
+                Desync::FakedSplit { ttl, fooling, .. } => {
+                    wrap = Some((vec![0u8; seg.data.len()], *ttl, fooling, "нули"));
+                }
+                Desync::HostFakeSplit { ttl, fooling }
+                    if ctx.host.is_some() && seg.seq_offset as usize == ctx.host_off && seg.data.len() == ctx.host_len =>
+                {
+                    wrap = Some((fake_host(ctx.host_len, &mut seed), *ttl, fooling, "чужое имя"));
+                }
+                _ => continue,
+            }
+            break;
+        }
+        match wrap {
+            Some((data, ttl, fooling, what)) => {
+                let fake = Segment {
+                    kind: SegKind::Fake,
+                    seq_offset: seg.seq_offset,
+                    label: format!("фейк {} ({what})", seg.label),
+                    data,
+                    ttl: fooling.contains(&Fooling::Ttl).then_some(ttl),
+                    fooling: fooling.clone(),
+                };
+                out.push(fake.clone());
+                out.push(seg);
+                out.push(fake);
+            }
+            None => out.push(seg),
+        }
+    }
+    segments.extend(out);
 
     Plan { proto: ctx.proto, host: ctx.host, payload_len: len, segments }
 }
@@ -365,6 +441,16 @@ impl Strategy {
                 }
                 Desync::TlsRecordSplit { at } => format!("tlsrec={}", pos(at)),
                 Desync::HostCase => "hostcase".into(),
+                Desync::FakedSplit { at, ttl, fooling, disorder } => {
+                    let f: Vec<_> = fooling.iter().map(|f| format!("{f:?}").to_lowercase()).collect();
+                    let m = if *disorder { "fakeddisorder" } else { "fakedsplit" };
+                    format!("{m}={} ttl={ttl} fool={}", pos(at), f.join("+"))
+                }
+                Desync::HostFakeSplit { ttl, fooling } => {
+                    let f: Vec<_> = fooling.iter().map(|f| format!("{f:?}").to_lowercase()).collect();
+                    format!("hostfakesplit ttl={ttl} fool={}", f.join("+"))
+                }
+                Desync::AutoTtl { delta, min, max } => format!("autottl={delta:+}:{min}-{max}"),
             })
             .collect::<Vec<_>>()
             .join("  ")
@@ -471,6 +557,57 @@ mod tests {
         let p = b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n";
         let plan = plan(p, &strat(vec![Desync::HostCase]), 1);
         assert!(reassemble(&plan).windows(5).any(|w| w == b"hoSt:"));
+    }
+
+    #[test]
+    fn fakedsplit_wraps_each_part_in_fakes() {
+        let p = tls::build_client_hello("www.youtube.com");
+        let s = strat(vec![Desync::FakedSplit { at: Pos::abs(1), ttl: 0, fooling: vec![Fooling::Ts], disorder: false }]);
+        let plan = plan(&p, &s, 1);
+        let kinds: Vec<_> = plan.segments.iter().map(|s| (s.kind, s.seq_offset)).collect();
+        use SegKind::*;
+        assert_eq!(kinds, vec![(Fake, 0), (Real, 0), (Fake, 0), (Fake, 1), (Real, 1), (Fake, 1)]);
+        let fake = &plan.segments[3];
+        assert_eq!(fake.data.len(), p.len() - 1);
+        assert!(fake.data.iter().all(|b| *b == 0) && fake.fooling == vec![Fooling::Ts]);
+        assert_eq!(reassemble(&plan), p);
+    }
+
+    #[test]
+    fn fakeddisorder_sends_second_part_first() {
+        let p = tls::build_client_hello("discord.com");
+        let s = strat(vec![Desync::FakedSplit { at: Pos::at(Anchor::Midsld), ttl: 3, fooling: vec![Fooling::Ttl], disorder: true }]);
+        let plan = plan(&p, &s, 1);
+        assert_eq!(plan.segments.len(), 6);
+        assert!(plan.segments[1].kind == SegKind::Real && plan.segments[1].seq_offset > 0);
+        assert_eq!(plan.segments[0].ttl, Some(3));
+        assert_eq!(reassemble(&plan), p);
+    }
+
+    #[test]
+    fn hostfakesplit_surrounds_host_with_fake_names() {
+        let p = tls::build_client_hello("www.youtube.com");
+        let sni = tls::parse_sni(&p).unwrap();
+        let s = strat(vec![Desync::HostFakeSplit { ttl: 0, fooling: vec![Fooling::BadSeq] }]);
+        let plan = plan(&p, &s, 9);
+        let kinds: Vec<_> = plan.segments.iter().map(|s| s.kind).collect();
+        use SegKind::*;
+        assert_eq!(kinds, vec![Real, Fake, Real, Fake, Real]);
+        let (fake, host) = (&plan.segments[1], &plan.segments[2]);
+        assert_eq!(host.data, b"www.youtube.com");
+        assert_eq!(fake.seq_offset as usize, sni.offset);
+        assert_eq!(fake.data.len(), host.data.len());
+        assert_ne!(fake.data, host.data);
+        assert!(fake.data.ends_with(b".com"));
+        assert_eq!(reassemble(&plan), p);
+    }
+
+    #[test]
+    fn auto_ttl_counts_hops() {
+        assert_eq!(auto_ttl(52, -1, 3, 20), 11); // 64 − 52 = 12 хопов
+        assert_eq!(auto_ttl(115, -2, 3, 20), 11); // 128 − 115 = 13
+        assert_eq!(auto_ttl(63, -1, 3, 20), 3); // 1 хоп → не меньше min
+        assert_eq!(auto_ttl(200, -1, 3, 20), 20); // 55 хопов → не больше max
     }
 
     #[test]

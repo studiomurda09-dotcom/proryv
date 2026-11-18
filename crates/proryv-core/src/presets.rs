@@ -34,36 +34,49 @@ pub fn builtin_strategies() -> Vec<Strategy> {
     let google = || FakeSni::Fixed("www.google.com".into());
     vec![
         // --- Рабочие рецепты из zapret-discord-youtube ---
-        s("alt7", "ALT7: наложение + разрез у SNI", "Разрез на 2-м байте и сразу после начала SNI, наложение 679 байт фейка к google.com (general ALT7).",
+        s("alt7", "Split + Overlap (ALT7)", "Разрез на 2-м байте и сразу после начала SNI, наложение 679 байт фейка к google.com (general ALT7).",
           vec![Desync::MultiSplit { at: vec![Pos::abs(2), Pos { anchor: SniExt, add: 1 }] },
                Desync::SeqOverlap { len: 679, sni: "www.google.com".into() }]),
-        s("alt11", "ALT11: фейки (ts) + наложение", "8 фейков, которые сервер отбросит по timestamp, затем наложение 681 байт (general ALT11).",
+        s("alt11", "Fake TS + Overlap (ALT11)", "8 фейков, которые сервер отбросит по timestamp, затем наложение 681 байт (general ALT11).",
           vec![Desync::Fake { ttl: 0, fooling: vec![Fooling::Ts], sni: google(), repeats: 8 },
                Desync::MultiSplit { at: vec![Pos::abs(1)] },
                Desync::SeqOverlap { len: 681, sni: "www.google.com".into() }]),
-        s("fake_ts", "Фейки (ts)", "6 фейковых ClientHello к google.com с уменьшенным timestamp (general ALT10).",
+        s("fake_ts", "Fake TS", "6 фейковых ClientHello к google.com с уменьшенным timestamp (general ALT10).",
           vec![Desync::Fake { ttl: 0, fooling: vec![Fooling::Ts], sni: google(), repeats: 6 }]),
-        s("seqovl_google", "Наложение (Google)", "Перед данными — 681 байт фейкового ClientHello к google.com «из прошлого». Основной метод zapret для YouTube.",
+        s("seqovl_google", "Overlap · Google", "Перед данными — 681 байт фейкового ClientHello к google.com «из прошлого». Основной метод zapret для YouTube.",
           vec![Desync::MultiSplit { at: vec![Pos::abs(1)] }, Desync::SeqOverlap { len: 681, sni: "www.google.com".into() }]),
-        s("seqovl_4pda", "Наложение (4pda)", "То же наложение, 568 байт к 4pda.to. Метод zapret для Discord и остальных сайтов.",
+        s("seqovl_4pda", "Overlap · 4pda", "То же наложение, 568 байт к 4pda.to. Метод zapret для Discord и остальных сайтов.",
           vec![Desync::MultiSplit { at: vec![Pos::abs(1)] }, Desync::SeqOverlap { len: 568, sni: "4pda.to".into() }]),
-        s("fake_multidisorder", "Фейки + обратный порядок", "11 фейков с неверным seq, потом части задом наперёд (разрез посередине домена).",
+        s("fake_multidisorder", "Fake BadSeq + Disorder", "11 фейков с неверным seq, потом части задом наперёд (разрез посередине домена).",
           vec![Desync::Fake { ttl: 0, fooling: vec![Fooling::BadSeq], sni: google(), repeats: 11 },
                Desync::MultiDisorder { at: vec![Pos::abs(1), Pos::at(Midsld)] }]),
         // md5sig и TLS-record split убраны: тест probe показал, что они рвут соединения
         // (md5-фейк принимается серверами Google; tlsrec меняет длину данных и ломает seq).
         // --- Базовые методы ---
-        s("split_mid", "Разрез посередине имени", "Режет ClientHello посередине SNI.",
+        s("split_mid", "Split Mid-Host", "Режет ClientHello посередине SNI.",
           vec![Desync::Split { at: Pos::at(HostMid) }]),
-        s("disorder_1", "Беспорядок", "Режет после 1 байта и отправляет части задом наперёд.",
+        s("disorder_1", "Disorder", "Режет после 1 байта и отправляет части задом наперёд.",
           vec![Desync::Disorder { at: Pos::abs(1) }]),
-        s("multisplit_host", "Мультиразрез", "Режет перед, в середине и после имени сайта.",
+        s("multisplit_host", "Multi-Split Host", "Режет перед, в середине и после имени сайта.",
           vec![Desync::MultiSplit { at: vec![Pos::abs(1), Pos::at(HostStart), Pos::at(HostMid), Pos::at(HostEnd)] }]),
-        s("fake_ttl_split", "Фейк (TTL) + разрез", "Сначала поддельный ClientHello с малым TTL, потом настоящий с разрезом.",
+        s("fake_ttl_split", "Fake TTL + Split", "Сначала поддельный ClientHello с малым TTL, потом настоящий с разрезом.",
           vec![fake(4, vec![Fooling::Ttl], 2), Desync::Split { at: Pos::at(HostMid) }]),
-        s("fake_badseq_disorder", "Фейк (badseq) + беспорядок", "Фейк с неверным seq и отправка частей задом наперёд.",
+        s("fake_badseq_disorder", "Fake BadSeq + Reverse", "Фейк с неверным seq и отправка частей задом наперёд.",
           vec![fake(0, vec![Fooling::BadSeq], 3), Desync::Disorder { at: Pos::at(HostMid) }]),
-        s("http_hostcase", "HTTP: регистр Host", "Для обычного HTTP: hoSt вместо Host + разрез.",
+        // --- Методы zapret 0.4: fakedsplit, hostfakesplit, datanoack.
+        // autottl есть в движке, но встроенным не стал: на сотовой сети TTL ответа подменяется,
+        // хопы считаются неверно, и фейки доходят до сервера (probe: YouTube 1/6 и 2/6).
+        s("faked_split_ts", "Faked Split TS", "Фейк к google.com, затем ClientHello режется на 1-м байте, и каждый кусок окружён фейком той же длины (fooling=ts).",
+          vec![Desync::Fake { ttl: 0, fooling: vec![Fooling::Ts], sni: google(), repeats: 6 },
+               Desync::FakedSplit { at: Pos::abs(1), ttl: 0, fooling: vec![Fooling::Ts], disorder: false }]),
+        s("faked_disorder_ts", "Faked Disorder TS", "Разрез посередине домена, куски задом наперёд, вокруг каждого — фейки той же длины, которые сервер отбросит по timestamp.",
+          vec![Desync::FakedSplit { at: Pos::at(Midsld), ttl: 0, fooling: vec![Fooling::Ts], disorder: true }]),
+        s("host_fake_split", "Host Fake Split", "Имя сайта уходит отдельным куском, а до и после него — фейки с выдуманным именем той же длины.",
+          vec![Desync::HostFakeSplit { ttl: 0, fooling: vec![Fooling::Ts] }]),
+        s("fake_noack_split", "Fake NoACK + Split", "Фейки без флага ACK (сервер их отбросит, DPI — нет), затем разрез посередине имени.",
+          vec![Desync::Fake { ttl: 0, fooling: vec![Fooling::DataNoAck], sni: google(), repeats: 4 },
+               Desync::Split { at: Pos::at(HostMid) }]),
+        s("http_hostcase", "HTTP Host Case", "Для обычного HTTP: hoSt вместо Host + разрез.",
           vec![Desync::HostCase, Desync::Split { at: Pos::at(HostMid) }]),
     ]
 }
@@ -90,7 +103,7 @@ pub fn builtin_presets() -> Vec<Preset> {
             ]),
             ip_id_zero: true,
             // Порядок по тесту probe напрямую через сотовую сеть: alt11 6/6, fake_multidisorder 5/6, остальные ≤2/6.
-            strategies: st(&["alt11", "fake_multidisorder", "alt7", "seqovl_google", "fake_ts", "seqovl_4pda", "multisplit_host"]),
+            strategies: st(&["alt11", "fake_multidisorder", "alt7", "seqovl_google", "fake_ts", "seqovl_4pda", "multisplit_host", "faked_split_ts", "host_fake_split", "faked_disorder_ts", "fake_noack_split"]),
         },
         Preset {
             id: "discord".into(),
@@ -108,7 +121,7 @@ pub fn builtin_presets() -> Vec<Preset> {
                 "discordmerch.com", "discordpartygames.com", "discordsays.com", "discordsez.com", "discordstatus.com",
                 "dis.gd", "discord-attachments-uploads-prd.storage.googleapis.com", "stable.dl2.discordapp.net",
             ]),
-            strategies: st(&["alt11", "fake_multidisorder", "seqovl_4pda", "alt7", "disorder_1"]),
+            strategies: st(&["alt11", "fake_multidisorder", "seqovl_4pda", "alt7", "disorder_1", "faked_split_ts", "host_fake_split", "fake_noack_split"]),
         },
         Preset {
             id: "roblox".into(),
@@ -119,7 +132,7 @@ pub fn builtin_presets() -> Vec<Preset> {
             tcp_ports: vec![443],
             udp_ports: vec![],
             domains: d(&["roblox.com", "rbxcdn.com", "rbx.com", "robloxlabs.com"]),
-            strategies: st(&["seqovl_4pda", "fake_multidisorder", "multisplit_host"]),
+            strategies: st(&["seqovl_4pda", "fake_multidisorder", "multisplit_host", "faked_split_ts", "host_fake_split", "faked_disorder_ts", "fake_noack_split"]),
         },
         Preset {
             id: "general".into(),
@@ -144,7 +157,7 @@ pub fn builtin_presets() -> Vec<Preset> {
                 "soundcloud.com", "sndcdn.com", "medium.com", "patreon.com", "patreonusercontent.com",
                 "proton.me", "protonmail.com", "archive.org",
             ]),
-            strategies: st(&["alt11", "fake_multidisorder", "alt7", "seqovl_4pda", "multisplit_host", "http_hostcase"]),
+            strategies: st(&["alt11", "fake_multidisorder", "alt7", "seqovl_4pda", "multisplit_host", "http_hostcase", "faked_split_ts", "host_fake_split", "faked_disorder_ts", "fake_noack_split"]),
         },
         Preset {
             id: "social".into(),
@@ -158,7 +171,7 @@ pub fn builtin_presets() -> Vec<Preset> {
                 "instagram.com", "cdninstagram.com", "facebook.com", "fbcdn.net", "fb.com", "messenger.com",
                 "x.com", "twitter.com", "twimg.com", "t.co", "threads.net", "linkedin.com", "licdn.com",
             ]),
-            strategies: st(&["alt11", "fake_multidisorder", "alt7", "seqovl_4pda"]),
+            strategies: st(&["alt11", "fake_multidisorder", "alt7", "seqovl_4pda", "faked_split_ts", "host_fake_split", "faked_disorder_ts", "fake_noack_split"]),
         },
         Preset {
             id: "universal".into(),
@@ -169,7 +182,7 @@ pub fn builtin_presets() -> Vec<Preset> {
             tcp_ports: vec![80, 443],
             udp_ports: vec![(443, 443)],
             domains: vec![],
-            strategies: st(&["alt11", "fake_multidisorder", "alt7", "seqovl_4pda", "multisplit_host", "http_hostcase"]),
+            strategies: st(&["alt11", "fake_multidisorder", "alt7", "seqovl_4pda", "multisplit_host", "http_hostcase", "faked_split_ts", "host_fake_split", "faked_disorder_ts", "fake_noack_split"]),
         },
     ]
 }
