@@ -13,8 +13,6 @@ window.MOCK_DATA = {
     "custom_domains": [],
     "custom_strategies": [],
     "dev_mode": false,
-    "doh": true,
-    "doh_server": "https://cloudflare-dns.com/dns-query",
     "enable_on_launch": false,
     "enabled_presets": [
       "youtube",

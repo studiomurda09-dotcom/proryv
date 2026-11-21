@@ -37,16 +37,28 @@ struct AppState {
     trace: Trace,
 }
 
+/// Блокировка, которая переживает панику другого потока: иначе одна ошибка
+/// «отравляет» мьютекс и все следующие команды тоже падают до перезапуска.
+trait Lock<T> {
+    fn lk(&self) -> std::sync::MutexGuard<'_, T>;
+}
+
+impl<T> Lock<T> for Mutex<T> {
+    fn lk(&self) -> std::sync::MutexGuard<'_, T> {
+        self.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
 // ---------------------------------------------------------------- Telegram
 
 fn sync_tg(state: &AppState) {
-    let mut s = state.settings.lock().unwrap();
-    let mut tg = state.tg.lock().unwrap();
+    let mut s = state.settings.lk();
+    let mut tg = state.tg.lk();
     if !s.telegram {
         if let Some(mut p) = tg.take() {
             p.stop();
         }
-        *state.tg_error.lock().unwrap() = None;
+        *state.tg_error.lk() = None;
         return;
     }
     if s.telegram_secret.len() != 32 {
@@ -62,9 +74,9 @@ fn sync_tg(state: &AppState) {
         match proryv_tg::TgProxy::start(s.telegram_port, &s.telegram_secret) {
             Ok(p) => {
                 *tg = Some(p);
-                *state.tg_error.lock().unwrap() = None;
+                *state.tg_error.lk() = None;
             }
-            Err(e) => *state.tg_error.lock().unwrap() = Some(e),
+            Err(e) => *state.tg_error.lk() = Some(e),
         }
     }
 }
@@ -80,13 +92,13 @@ struct TgInfo {
 
 #[tauri::command(async)]
 fn tg_info(state: State<AppState>) -> TgInfo {
-    let s = state.settings.lock().unwrap();
-    let tg = state.tg.lock().unwrap();
+    let s = state.settings.lk();
+    let tg = state.tg.lk();
     TgInfo {
         enabled: s.telegram,
         running: tg.is_some(),
         link: proryv_tg::link(s.telegram_port, &s.telegram_secret),
-        error: state.tg_error.lock().unwrap().clone(),
+        error: state.tg_error.lk().clone(),
         stats: tg.as_ref().map(|p| p.stats()),
     }
 }
@@ -124,7 +136,7 @@ fn telegram_running() -> bool {
 #[tauri::command(async)]
 fn tg_open(state: State<AppState>) -> Result<(), String> {
     let link = {
-        let s = state.settings.lock().unwrap();
+        let s = state.settings.lk();
         proryv_tg::link(s.telegram_port, &s.telegram_secret)
     };
     let exe = telegram_exe().ok_or("Telegram Desktop не найден. Скопируйте ссылку и откройте её в Telegram вручную.")?;
@@ -148,7 +160,7 @@ fn tg_open(state: State<AppState>) -> Result<(), String> {
 async fn tg_test(app: AppHandle) -> Vec<(i16, Result<u128, String>)> {
     let (port, secret) = {
         let st = app.state::<AppState>();
-        let s = st.settings.lock().unwrap();
+        let s = st.settings.lk();
         (s.telegram_port, s.telegram_secret.clone())
     };
     tauri::async_runtime::spawn_blocking(move || {
@@ -176,7 +188,7 @@ struct Conflict {
 
 /// Английский ли интерфейс: по настройке, а для «Как в системе» — по языку Windows.
 fn is_en(state: &AppState) -> bool {
-    match state.settings.lock().unwrap().language.as_str() {
+    match state.settings.lk().language.as_str() {
         "en" => true,
         "ru" => false,
         _ => !system_is_russian(),
@@ -200,7 +212,7 @@ fn system_is_russian() -> bool {
 fn notify(app: &AppHandle, title: (&str, &str), body: (String, String)) {
     use tauri_plugin_notification::NotificationExt;
     let state = app.state::<AppState>();
-    if !state.settings.lock().unwrap().notifications {
+    if !state.settings.lk().notifications {
         return;
     }
     let en = is_en(&state);
@@ -238,8 +250,8 @@ fn start_engine_notify(app: &AppHandle) -> Status {
 // ---------------------------------------------------------------- движок
 
 fn start_engine(state: &AppState) -> Status {
-    let mut engine = state.engine.lock().unwrap();
-    let settings = state.settings.lock().unwrap();
+    let mut engine = state.engine.lk();
+    let settings = state.settings.lk();
     engine.trace = settings.dev_mode.then(|| state.trace.clone());
     let cfg = RunConfig::from_settings(&settings);
     drop(settings);
@@ -251,13 +263,13 @@ fn start_engine(state: &AppState) -> Status {
 }
 
 fn stop_engine(state: &AppState) -> Status {
-    let mut engine = state.engine.lock().unwrap();
+    let mut engine = state.engine.lk();
     engine.stop();
     engine.status()
 }
 
 fn is_running(state: &AppState) -> bool {
-    state.engine.lock().unwrap().status().state == EngineState::Running
+    state.engine.lk().status().state == EngineState::Running
 }
 
 // ---------------------------------------------------------------- команды
@@ -268,15 +280,15 @@ fn get_bootstrap(state: State<AppState>) -> Bootstrap {
         version: proryv_core::APP_VERSION,
         presets: base::presets(),
         strategies: base::strategies(),
-        settings: state.settings.lock().unwrap().clone(),
+        settings: state.settings.lk().clone(),
     }
 }
 
 #[tauri::command(async)]
 fn save_settings(state: State<AppState>, mut settings: Settings) -> Result<(), String> {
-    let (old_autostart, old_secret) = {
-        let s = state.settings.lock().unwrap();
-        (s.autostart, s.telegram_secret.clone())
+    let (old_autostart, old_secret, same_bypass) = {
+        let s = state.settings.lk();
+        (s.autostart, s.telegram_secret.clone(), s.same_bypass(&settings))
     };
     // Секрет Telegram создаётся на стороне приложения — интерфейс мог прислать старый пустой.
     if settings.telegram_secret.len() != 32 {
@@ -285,12 +297,13 @@ fn save_settings(state: State<AppState>, mut settings: Settings) -> Result<(), S
     settings.save(&state.settings_path).map_err(|e| e.to_string())?;
     let autostart = settings.autostart;
     base::set_custom(&settings.custom_strategies);
-    *state.settings.lock().unwrap() = settings;
+    *state.settings.lk() = settings;
     if autostart != old_autostart {
         set_autostart(autostart)?;
     }
-    // Обход включён — перезапускаем движок, чтобы новые пресеты и режимы применились сразу.
-    if is_running(&state) {
+    // Обход включён и поменялось что-то для перехвата — перезапускаем движок, чтобы новое применилось сразу.
+    // Тема, фон, язык и т.п. перехват не трогают: раньше каждое движение ползунка рвало соединения.
+    if !same_bypass && is_running(&state) {
         start_engine(&state);
     }
     sync_tg(&state);
@@ -304,7 +317,7 @@ fn default_settings() -> Settings {
 
 #[tauri::command(async)]
 fn get_status(state: State<AppState>) -> Status {
-    state.engine.lock().unwrap().status()
+    state.engine.lk().status()
 }
 
 #[tauri::command(async)]
@@ -392,8 +405,8 @@ struct TuneDone {
 fn run_tune(app: &AppHandle, preset: &str, source: &'static str) {
     let state = app.state::<AppState>();
     let was_running = is_running(&state);
-    state.engine.lock().unwrap().pause();
-    let base = state.settings.lock().unwrap().clone();
+    state.engine.lk().pause();
+    let base = state.settings.lk().clone();
     let res: Result<Outcome, String> = autotune::run(preset, &base, |p: &Progress| {
         if source == "manual" {
             let _ = app.emit("autotune", p);
@@ -401,7 +414,7 @@ fn run_tune(app: &AppHandle, preset: &str, source: &'static str) {
     });
     if let Ok(out) = &res {
         if let Some(best) = &out.best {
-            let mut s = state.settings.lock().unwrap();
+            let mut s = state.settings.lk();
             s.strategy_override.retain(|(p, _)| p != preset);
             s.strategy_override.push((preset.to_string(), best.clone()));
             let _ = s.save(&state.settings_path);
@@ -460,13 +473,13 @@ fn spawn_healer(app: AppHandle) {
         loop {
             std::thread::sleep(Duration::from_secs(20));
             let state = app.state::<AppState>();
-            let settings = state.settings.lock().unwrap().clone();
+            let settings = state.settings.lk().clone();
             if !settings.auto_heal || state.autotune_running.load(Ordering::SeqCst) || !is_running(&state) {
                 prev.clear();
                 continue;
             }
             let cooled = |p: &str| last_heal.get(p).is_none_or(|t| t.elapsed() > Duration::from_secs(15 * 60));
-            let now_h = state.engine.lock().unwrap().health();
+            let now_h = state.engine.lk().health();
             let mut target = None;
             for (preset, (d, r)) in &now_h {
                 let (pd, pr) = prev.get(preset).copied().unwrap_or((0, 0));
@@ -483,6 +496,15 @@ fn spawn_healer(app: AppHandle) {
                 target = watch_presets(&settings).into_iter().find(|p| cooled(p));
             }
             if let Some(preset) = target {
+                #[cfg(windows)]
+                let iface = platform::windivert::direct_source_ip();
+                #[cfg(not(windows))]
+                let iface: Option<String> = None;
+                // Нет сети вообще — обход не виноват, подбирать нечего.
+                if !autotune::internet_ok(iface.as_deref()) {
+                    prev.clear();
+                    continue;
+                }
                 if state.autotune_running.swap(true, Ordering::SeqCst) {
                     continue;
                 }
@@ -624,7 +646,7 @@ fn preview_strategy(host: String, strategy: Strategy) -> Plan {
 /// Строки журнала начиная с `since` и номер для следующего запроса.
 #[tauri::command]
 fn dev_log(state: State<AppState>, since: u64) -> (u64, Vec<String>) {
-    state.trace.lock().unwrap().since(since)
+    state.trace.lk().since(since)
 }
 
 /// Проверить стратегию (даже ещё не сохранённую) на адресах пресета, мимо VPN.
@@ -634,13 +656,13 @@ fn dev_check(state: State<AppState>, preset: String, strategy: Strategy) -> Resu
     if state.autotune_running.swap(true, Ordering::SeqCst) {
         return Err("Подбор уже идёт".into());
     }
-    let settings = state.settings.lock().unwrap().clone();
+    let settings = state.settings.lk().clone();
     let mut custom = settings.custom_strategies.clone();
     custom.retain(|c| c.strategy.id != strategy.id);
     custom.push(proryv_core::config::CustomStrategy { strategy: strategy.clone(), zapret: String::new(), enabled: true, result: None });
     base::set_custom(&custom);
     let was_running = is_running(&state);
-    state.engine.lock().unwrap().pause();
+    state.engine.lk().pause();
     let res = autotune::check_one(&preset, &strategy.id, &settings);
     base::set_custom(&settings.custom_strategies);
     if was_running {
@@ -677,8 +699,8 @@ fn isp_info() -> IspInfo {
 /// Без личных данных: ни IP, ни своих доменов, ни имён адаптеров.
 #[tauri::command(async)]
 fn diag_report(state: State<AppState>) -> String {
-    let settings = state.settings.lock().unwrap().clone();
-    let status = state.engine.lock().unwrap().status();
+    let settings = state.settings.lk().clone();
+    let status = state.engine.lk().status();
     let en = is_en(&state);
     let tr = |ru: &'static str, e: &'static str| if en { e } else { ru };
     let winver = hidden_cmd("cmd").args(["/C", "ver"]).output().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
@@ -751,7 +773,7 @@ fn spawn_base_loader(app: AppHandle, cache: PathBuf) {
     }
     std::thread::spawn(move || {
         let state = app.state::<AppState>();
-        let update = state.settings.lock().unwrap().update_base;
+        let update = state.settings.lk().update_base;
         let before = (base::presets(), base::strategies());
         if update {
             let cached = base::base().map_or(0, |b| b.version);
@@ -894,7 +916,7 @@ fn spawn_tray_watch(app: AppHandle) {
         let Some(base) = app.default_window_icon().cloned() else { return };
         let mut last = None;
         loop {
-            let st = app.state::<AppState>().engine.lock().unwrap().status().state;
+            let st = app.state::<AppState>().engine.lk().status().state;
             if last != Some(st) {
                 if let Some(tray) = app.tray_by_id("main") {
                     let en = is_en(&app.state::<AppState>());
@@ -972,7 +994,7 @@ pub fn run() {
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
                 let state = window.state::<AppState>();
-                if state.settings.lock().unwrap().minimize_to_tray {
+                if state.settings.lk().minimize_to_tray {
                     api.prevent_close();
                     let _ = window.hide();
                 } else {

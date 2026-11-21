@@ -105,6 +105,12 @@ pub fn tcp_connects(ip: &str, iface: Option<&str>) -> bool {
         .is_some_and(|t| t > 0.0)
 }
 
+/// Есть ли вообще интернет: открывается хоть один незаблокированный сайт.
+/// Без этого пропавшая сеть выглядит как поломка обхода и запускает бесполезный переподбор.
+pub fn internet_ok(iface: Option<&str>) -> bool {
+    check_all(&["https://ya.ru/", "https://vk.com/"], iface).0 > 0
+}
+
 /// Проверить все адреса параллельно: время шага — самый медленный сайт, а не сумма.
 pub fn check_all(urls: &[&str], iface: Option<&str>) -> (usize, u64, Vec<Check>) {
     let checks: Vec<Check> = std::thread::scope(|s| {

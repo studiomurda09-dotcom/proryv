@@ -57,8 +57,6 @@ pub struct Settings {
     pub game_filter: String,
     /// Диапазоны IP игровых серверов (CIDR), к которым применяется Game Filter.
     pub game_ips: Vec<String>,
-    pub doh: bool,
-    pub doh_server: String,
 
     pub custom_domains: Vec<String>,
     pub excluded_domains: Vec<String>,
@@ -96,8 +94,6 @@ impl Default for Settings {
             telegram_secret: String::new(),
             game_filter: "off".into(),
             game_ips: vec!["128.116.0.0/17".into()], // Roblox
-            doh: true,
-            doh_server: "https://cloudflare-dns.com/dns-query".into(),
             custom_domains: vec![],
             excluded_domains: vec![],
             autostart: false,
@@ -113,18 +109,117 @@ impl Default for Settings {
     }
 }
 
+use std::path::{Path, PathBuf};
+
+/// Рядом с settings.json: копия прошлой удачной записи и картинка фона.
+fn sibling(path: &Path, ext: &str) -> PathBuf {
+    let mut p = path.as_os_str().to_owned();
+    p.push(ext);
+    PathBuf::from(p)
+}
+
 impl Settings {
-    pub fn load(path: &std::path::Path) -> Settings {
-        std::fs::read_to_string(path)
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default()
+    /// Битый файл (выключили свет посреди записи) — берём копию .bak, а не сбрасываем всё.
+    pub fn load(path: &Path) -> Settings {
+        let read = |p: &Path| std::fs::read_to_string(p).ok().and_then(|s| serde_json::from_str::<Settings>(&s).ok());
+        let mut s = read(path).or_else(|| read(&sibling(path, ".bak"))).unwrap_or_default();
+        // Картинка фона лежит отдельно (старые версии хранили её прямо в JSON — тогда оставляем ту).
+        if let Ok(img) = std::fs::read_to_string(sibling(path, ".bg")) {
+            s.bg_image = img;
+        }
+        s
     }
 
-    pub fn save(&self, path: &std::path::Path) -> std::io::Result<()> {
+    /// Запись через временный файл: settings.json всегда либо старый, либо новый целиком.
+    pub fn save(&self, path: &Path) -> std::io::Result<()> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        std::fs::write(path, serde_json::to_string_pretty(self).expect("settings serialize"))
+        let bg = sibling(path, ".bg");
+        if self.bg_image.is_empty() {
+            let _ = std::fs::remove_file(&bg);
+        } else if std::fs::read_to_string(&bg).ok().as_deref() != Some(self.bg_image.as_str()) {
+            let tmp = sibling(path, ".bg.tmp");
+            std::fs::write(&tmp, &self.bg_image)?;
+            std::fs::rename(&tmp, &bg)?;
+        }
+        let json = serde_json::to_string_pretty(&Settings { bg_image: String::new(), ..self.clone() }).expect("settings serialize");
+        let tmp = sibling(path, ".tmp");
+        std::fs::write(&tmp, json)?;
+        if path.exists() {
+            let _ = std::fs::copy(path, sibling(path, ".bak"));
+        }
+        std::fs::rename(&tmp, path)
+    }
+
+    /// Совпадает ли всё, что влияет на перехват. Тема, язык, фон и т.п. — не повод перезапускать движок.
+    pub fn same_bypass(&self, o: &Settings) -> bool {
+        self.enabled_presets == o.enabled_presets
+            && self.strategy_override == o.strategy_override
+            && self.random_fakes == o.random_fakes
+            && self.block_quic == o.block_quic
+            && self.game_filter == o.game_filter
+            && self.game_ips == o.game_ips
+            && self.custom_domains == o.custom_domains
+            && self.excluded_domains == o.excluded_domains
+            && self.custom_strategies == o.custom_strategies
+            && self.dev_mode == o.dev_mode
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmp_dir(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("proryv-test-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn save_load_roundtrip_keeps_bg_outside_json() {
+        let d = tmp_dir("rt");
+        let p = d.join("settings.json");
+        let s = Settings { bg_image: "data:image/jpeg;base64,AAAA".into(), theme: "black".into(), ..Default::default() };
+        s.save(&p).unwrap();
+        assert!(!std::fs::read_to_string(&p).unwrap().contains("base64"));
+        assert_eq!(Settings::load(&p), s);
+        Settings { bg_image: String::new(), ..s }.save(&p).unwrap();
+        assert!(!sibling(&p, ".bg").exists());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn corrupt_file_falls_back_to_backup() {
+        let d = tmp_dir("bak");
+        let p = d.join("settings.json");
+        let s = Settings { first_run_done: true, language: "en".into(), ..Default::default() };
+        s.save(&p).unwrap();
+        s.save(&p).unwrap(); // вторая запись создаёт .bak
+        std::fs::write(&p, "{\"first_run_d").unwrap();
+        assert_eq!(Settings::load(&p), s);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn old_json_with_inline_bg_and_doh_still_loads() {
+        let d = tmp_dir("old");
+        let p = d.join("settings.json");
+        std::fs::write(&p, r#"{"first_run_done":true,"bg_image":"data:x","doh":true,"doh_server":"x"}"#).unwrap();
+        let s = Settings::load(&p);
+        assert!(s.first_run_done);
+        assert_eq!(s.bg_image, "data:x");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn cosmetic_changes_do_not_affect_bypass() {
+        let a = Settings::default();
+        let b = Settings { theme: "light".into(), bg_dim: 10, accent: "#ffffff".into(), language: "en".into(), ..a.clone() };
+        assert!(a.same_bypass(&b));
+        let c = Settings { block_quic: !a.block_quic, ..a.clone() };
+        assert!(!a.same_bypass(&c));
     }
 }
