@@ -5,3 +5,5 @@ src-tauri/gen
 /.claude
 /promo/out
 *.local.md
+
+graphify-out/
