@@ -9,8 +9,9 @@ Proryv сам подбирает способ обхода под вашего �
 
 ## Что умеет
 
-- **Автоподбор.** Перебирает методы обхода и проверяет сайты напрямую, мимо VPN. Лучший способ сохраняется сам, за 1–3 минуты.
-- **Самолечение.** Если сайт перестал открываться, Proryv замечает повторные попытки соединения и сам переподбирает стратегию.
+- **Автоподбор.** Перебирает методы обхода и проверяет сайты напрямую, мимо VPN. Для YouTube смотрит не только «открылось», но и скорость видео. Лучший способ сохраняется сам, за 1–3 минуты.
+- **Самолечение.** Если сайт перестал открываться или видео тормозит, Proryv перепроверяет и сам переподбирает стратегию — остальные пресеты в это время работают. Зависшее соединение сразу повторяется запасной стратегией. Стратегии запоминаются для каждой сети: сменили Wi-Fi на мобильный — включится та, что там работала.
+- **SoundCloud.** Отдельный пресет: сайт, обложки и сам аудиопоток.
 - **База провайдеров.** Proryv определяет провайдера и сразу берёт стратегию, которая сработала у других его абонентов.
 - **Discord с голосом.** Голосовые каналы работают через тот же пресет, отдельно настраивать не нужно.
 - **Telegram.** Встроенный прокси через WebSocket веб-версии Telegram. Подключается одной кнопкой.
@@ -83,7 +84,8 @@ Proryv finds a DPI bypass strategy for your internet provider by itself and repa
 ![Home](docs/screenshots/en-home.png)
 
 - **Auto-tune:** tries bypass methods and checks sites directly (bypassing any VPN). The best one is saved automatically.
-- **Self-healing:** notices when a site stops opening and re-tunes the strategy.
+- **Self-healing:** notices when a site stops opening or video gets slow, rechecks and re-tunes the strategy while other presets keep working. Stuck connections are retried with a fallback strategy at once; strategies are remembered per network.
+- **SoundCloud** preset, including the audio stream.
 - **Provider database:** detects your provider and uses the strategy that worked for other users of the same provider.
 - **Discord voice, Telegram proxy, Game Filter** (TCP/UDP), VPN-safe, one-click updates, settings search, Russian and English UI.
 

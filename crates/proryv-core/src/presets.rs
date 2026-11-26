@@ -124,6 +124,19 @@ pub fn builtin_presets() -> Vec<Preset> {
             strategies: st(&["alt11", "fake_multidisorder", "seqovl_4pda", "alt7", "disorder_1", "faked_split_ts", "host_fake_split", "fake_noack_split"]),
         },
         Preset {
+            id: "soundcloud".into(),
+            name: "SoundCloud".into(),
+            description: "Сайт, приложение и сам аудиопоток (soundcloud.cloud).".into(),
+            icon: "music".into(),
+            ip_id_zero: false,
+            tcp_ports: vec![443],
+            udp_ports: vec![(443, 443)],
+            // Музыка идёт HLS-кусками с playback.media-streaming.soundcloud.cloud,
+            // обложки и скрипты — с *.sndcdn.com.
+            domains: d(&["soundcloud.com", "sndcdn.com", "soundcloud.cloud"]),
+            strategies: st(&["alt11", "fake_multidisorder", "seqovl_4pda", "alt7", "multisplit_host", "faked_split_ts", "host_fake_split", "faked_disorder_ts", "fake_noack_split"]),
+        },
+        Preset {
             id: "roblox".into(),
             name: "Roblox".into(),
             description: "Сайт, лаунчер и CDN Roblox.".into(),
@@ -137,7 +150,7 @@ pub fn builtin_presets() -> Vec<Preset> {
         Preset {
             id: "general".into(),
             name: "Прочие заблокированные".into(),
-            description: "Cloudflare, Twitch-эмоуты, DoH, трекеры, SoundCloud, Medium и др.".into(),
+            description: "Cloudflare, Twitch-эмоуты, DoH, трекеры, Medium, Patreon и др.".into(),
             icon: "list".into(),
             ip_id_zero: false,
             tcp_ports: vec![80, 443],
@@ -154,7 +167,7 @@ pub fn builtin_presets() -> Vec<Preset> {
                 "localizeapi.com", "klipy.com", "live-video.net",
                 // добавлено Proryv
                 "rutracker.org", "rutracker.cc", "rutracker.net", "rutor.info", "rutor.is", "nnmclub.to", "kinozal.tv",
-                "soundcloud.com", "sndcdn.com", "medium.com", "patreon.com", "patreonusercontent.com",
+                "medium.com", "patreon.com", "patreonusercontent.com",
                 "proton.me", "protonmail.com", "archive.org",
             ]),
             strategies: st(&["alt11", "fake_multidisorder", "alt7", "seqovl_4pda", "multisplit_host", "http_hostcase", "faked_split_ts", "host_fake_split", "faked_disorder_ts", "fake_noack_split"]),

@@ -103,23 +103,29 @@ pub fn build_initial(sni: &str, rnd: &[u8; 64]) -> Vec<u8> {
     pkt
 }
 
-/// Расшифровать Initial (для тестов и диагностики) → CRYPTO-данные.
-pub fn decrypt_initial(pkt: &[u8]) -> Option<Vec<u8>> {
-    if pkt.len() < 30 || pkt[0] & 0x80 == 0 || pkt[1..5] != [0, 0, 0, 1] {
+/// Целое переменной длины QUIC (RFC 9000, 16): 1, 2, 4 или 8 байт.
+fn read_varint(b: &[u8], i: &mut usize) -> Option<u64> {
+    let first = *b.get(*i)?;
+    let n = 1usize << (first >> 6);
+    let bytes = b.get(*i..*i + n)?;
+    let v = bytes[1..].iter().fold((first & 0x3f) as u64, |v, x| (v << 8) | *x as u64);
+    *i += n;
+    Some(v)
+}
+
+/// Снять защиту с клиентского Initial QUIC v1 → расшифрованные кадры.
+fn initial_plaintext(pkt: &[u8]) -> Option<Vec<u8>> {
+    // Длинный заголовок, тип Initial: верхние 4 бита 1100 (их защита заголовка не трогает).
+    if pkt.len() < 30 || pkt[0] & 0xf0 != 0xc0 || pkt[1..5] != [0, 0, 0, 1] {
         return None;
     }
     let mut i = 5;
     let dcil = pkt[i] as usize;
     let dcid = pkt.get(i + 1..i + 1 + dcil)?.to_vec();
     i += 1 + dcil;
-    i += 1 + pkt[i] as usize; // scid
-    i += 1 + pkt[i] as usize; // token (короткая длина)
-    let (len, n) = match pkt[i] >> 6 {
-        0 => (pkt[i] as usize & 0x3f, 1),
-        1 => (((pkt[i] as usize & 0x3f) << 8) | pkt[i + 1] as usize, 2),
-        _ => return None,
-    };
-    i += n;
+    i += 1 + *pkt.get(i)? as usize; // scid
+    i += read_varint(pkt, &mut i)? as usize; // token
+    let len = read_varint(pkt, &mut i)? as usize;
     let pn_offset = i;
     let (key, iv, hp) = client_initial_keys(&dcid);
     let mask = hp_mask(&hp, pkt.get(pn_offset + 4..pn_offset + 20)?);
@@ -140,18 +146,75 @@ pub fn decrypt_initial(pkt: &[u8]) -> Option<Vec<u8>> {
     }
     let mut body = pkt.get(pn_offset + pn_len..pn_offset + len)?.to_vec();
     Aes128Gcm::new_from_slice(&key).ok()?.decrypt_in_place(Nonce::from_slice(&nonce), &hdr, &mut body).ok()?;
-    if body.first() != Some(&0x06) {
-        return None;
+    Some(body)
+}
+
+/// CRYPTO-кадры Initial: (смещение, данные). PADDING и PING пропускаем.
+fn crypto_frames(body: &[u8]) -> Vec<(u64, &[u8])> {
+    let mut out = Vec::new();
+    let mut j = 0;
+    while j < body.len() {
+        match body[j] {
+            0x00 | 0x01 => j += 1,
+            0x06 => {
+                j += 1;
+                let (Some(off), Some(n)) = (read_varint(body, &mut j), read_varint(body, &mut j)) else { break };
+                let Some(d) = body.get(j..j + n as usize) else { break };
+                out.push((off, d));
+                j += n as usize;
+            }
+            _ => break, // остальные кадры в первом Initial клиента не нужны
+        }
     }
-    let mut j = 1;
-    j += 1; // offset 0 (1 байт)
-    let (clen, n) = match body[j] >> 6 {
-        0 => (body[j] as usize & 0x3f, 1),
-        1 => (((body[j] as usize & 0x3f) << 8) | body[j + 1] as usize, 2),
-        _ => return None,
-    };
-    j += n;
-    body.get(j..j + clen).map(|s| s.to_vec())
+    out
+}
+
+/// Расшифровать Initial (для тестов и диагностики) → CRYPTO-данные первого кадра.
+pub fn decrypt_initial(pkt: &[u8]) -> Option<Vec<u8>> {
+    let body = initial_plaintext(pkt)?;
+    crypto_frames(&body).first().map(|(_, d)| d.to_vec())
+}
+
+/// Имя сайта из клиентского QUIC Initial. Chrome режет ClientHello на несколько
+/// CRYPTO-кадров вперемешку (а с Kyber — ещё и на два пакета), поэтому склеиваем
+/// подряд идущие куски и ищем в них само расширение server_name.
+pub fn initial_sni(pkt: &[u8]) -> Option<String> {
+    let body = initial_plaintext(pkt)?;
+    let mut frags = crypto_frames(&body);
+    frags.sort_by_key(|f| f.0);
+    let mut run: Vec<u8> = Vec::new();
+    let mut end = None;
+    for (off, d) in frags {
+        if end != Some(off) {
+            if let Some(h) = find_sni(&run) {
+                return Some(h);
+            }
+            run.clear();
+        }
+        run.extend_from_slice(d);
+        end = Some(off + d.len() as u64);
+    }
+    find_sni(&run)
+}
+
+/// Найти расширение server_name в куске ClientHello: длины вложены друг в друга,
+/// так что случайное совпадение почти невозможно.
+fn find_sni(d: &[u8]) -> Option<String> {
+    let be = |i: usize| (d[i] as usize) << 8 | d[i + 1] as usize;
+    for i in 0..d.len().saturating_sub(8) {
+        if d[i] != 0 || d[i + 1] != 0 || d[i + 6] != 0 {
+            continue;
+        }
+        let (ext, list, name) = (be(i + 2), be(i + 4), be(i + 7));
+        if ext != list + 2 || list != name + 3 || name < 3 || i + 9 + name > d.len() {
+            continue;
+        }
+        let host = &d[i + 9..i + 9 + name];
+        if host.contains(&b'.') && host.iter().all(|c| c.is_ascii_alphanumeric() || *c == b'.' || *c == b'-') {
+            return std::str::from_utf8(host).ok().map(|s| s.to_ascii_lowercase());
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -183,5 +246,18 @@ mod tests {
         rec.extend_from_slice(&(crypto.len() as u16).to_be_bytes());
         rec.extend_from_slice(&crypto);
         assert_eq!(tls::parse_sni(&rec).unwrap().host, "www.google.com");
+    }
+
+    #[test]
+    fn sni_from_initial_and_from_fragments() {
+        let pkt = build_initial("rr3---sn-4g5e6nzz.googlevideo.com", &[0x17u8; 64]);
+        assert_eq!(initial_sni(&pkt).as_deref(), Some("rr3---sn-4g5e6nzz.googlevideo.com"));
+        // ClientHello, разрезанный посередине: имя целиком во втором куске — находим и там.
+        let hello = tls::build_client_hello("soundcloud.com");
+        let sni = tls::parse_sni(&hello).unwrap();
+        let cut = sni.offset - 20;
+        assert_eq!(find_sni(&hello[cut..]).as_deref(), Some("soundcloud.com"));
+        assert_eq!(find_sni(&hello[..sni.offset]), None, "обрезанное имя не угадываем");
+        assert_eq!(initial_sni(&[0x40; 1200]), None, "короткий заголовок — не Initial");
     }
 }

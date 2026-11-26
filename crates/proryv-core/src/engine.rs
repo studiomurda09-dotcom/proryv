@@ -36,7 +36,26 @@ pub struct Rule {
     pub domains: Vec<String>,
     pub strategy: Strategy,
     pub ip_id_zero: bool,
+    /// Запасные стратегии пресета: ими повторяем ClientHello, если первый не прошёл.
+    pub fallbacks: Vec<Strategy>,
 }
+
+/// Пробная стратегия одного пресета: автоподбор меняет её на ходу, а остальные пресеты
+/// продолжают работать. `strategy: None` — сайты пресета идут без обхода (замер «как есть»).
+#[derive(Clone, Debug)]
+pub struct TrialRule {
+    pub preset_id: String,
+    pub domains: Vec<String>,
+    pub ip_id_zero: bool,
+    pub strategy: Option<Strategy>,
+}
+
+pub type Trial = Arc<Mutex<Option<TrialRule>>>;
+
+/// Сколько запасных стратегий пробуем для одного соединения.
+const MAX_FALLBACKS: usize = 3;
+/// Сколько помним адрес, к которому шёл обход, чтобы резать к нему QUIC.
+const QUIC_IP_TTL: Duration = Duration::from_secs(600);
 
 #[derive(Clone, Debug, Default)]
 pub struct RunConfig {
@@ -95,7 +114,14 @@ impl RunConfig {
                 domains.extend(s.custom_domains.iter().map(|d| norm_domain(d)).filter(|d| !d.is_empty()));
             }
             ports.extend(p.tcp_ports.iter().copied());
-            rules.push(Rule { preset_id: p.id, domains, strategy, ip_id_zero: p.ip_id_zero });
+            let fallbacks = p
+                .strategies
+                .iter()
+                .filter(|id| **id != sid)
+                .filter_map(|id| strategies.iter().find(|x| x.id == *id).cloned())
+                .take(MAX_FALLBACKS)
+                .collect();
+            rules.push(Rule { preset_id: p.id, domains, strategy, ip_id_zero: p.ip_id_zero, fallbacks });
         }
         // Универсальный пресет (все сайты) — в конец, чтобы конкретные правила имели приоритет.
         rules.sort_by_key(|r| r.domains.is_empty());
@@ -137,7 +163,14 @@ impl RunConfig {
         }
     }
 
-    /// QUIC режем только к Google/YouTube по IPv4: UDP 443 нужен VPN-протоколам.
+    /// Правило одного пресета для пробы на ходу (домены — как у обычного правила).
+    pub fn trial_rule(s: &Settings, preset_id: &str, strategy: Option<Strategy>) -> Option<TrialRule> {
+        let one = Settings { enabled_presets: vec![preset_id.to_string()], ..s.clone() };
+        let r = RunConfig::from_settings(&one).rules.into_iter().find(|r| r.preset_id == preset_id)?;
+        Some(TrialRule { preset_id: r.preset_id, domains: r.domains, ip_id_zero: r.ip_id_zero, strategy })
+    }
+
+    /// Сети Google: к ним QUIC режем всегда, даже если имя сайта не разобрать.
     fn is_google(&self, ip: Option<u128>) -> bool {
         ip.is_some_and(|ip| crate::platform::google_nets().iter().any(|n| n.contains(ip)))
     }
@@ -146,14 +179,18 @@ impl RunConfig {
         ip.is_some_and(|ip| self.game_nets.iter().any(|n| n.contains(ip)))
     }
 
-    fn rule_for(&self, host: &str) -> Option<&Rule> {
+    fn is_excluded(&self, host: &str) -> bool {
+        self.excluded.iter().any(|d| host_matches(host, d))
+    }
+
+    fn rule_index(&self, host: &str) -> Option<usize> {
         let host = host.to_ascii_lowercase();
-        if self.excluded.iter().any(|d| host_matches(&host, d)) {
+        if self.is_excluded(&host) {
             return None;
         }
         self.rules
             .iter()
-            .find(|r| r.domains.is_empty() || r.domains.iter().any(|d| host_matches(&host, d)))
+            .position(|r| r.domains.is_empty() || r.domains.iter().any(|d| host_matches(&host, d)))
     }
 }
 
@@ -164,6 +201,8 @@ pub struct Counters {
     pub fakes_sent: AtomicU64,
     pub quic_blocked: AtomicU64,
     pub udp_desynced: AtomicU64,
+    /// Соединения, которые спасли запасной стратегией после повтора ClientHello.
+    pub rescued: AtomicU64,
     pub last_host: Mutex<Option<String>>,
     /// По пресетам: (обработано ClientHello, из них повторных — признак, что не прошло).
     pub health: Mutex<HashMap<String, (u64, u64)>>,
@@ -176,6 +215,10 @@ pub struct Stats {
     pub fakes_sent: u64,
     pub uptime_secs: u64,
     pub last_host: Option<String>,
+    #[serde(default)]
+    pub quic_blocked: u64,
+    #[serde(default)]
+    pub rescued: u64,
 }
 
 #[derive(Debug)]
@@ -217,8 +260,11 @@ pub struct Processor {
     held: HeldMap,
     /// Счётчик пакетов по потокам (UDP и Game Filter TCP): (proto, v6, sport, dport, dst_ip).
     flows: HashMap<(u8, bool, u16, u16, u128), (u32, Instant)>,
-    /// Недавние ClientHello: (v6, sport, dport, seq) — чтобы ловить повторы (самолечение).
-    recent: HashMap<(bool, u16, u16, u32), Instant>,
+    /// Недавние ClientHello: (v6, sport, dport, seq) → (когда, сколько раз уже повторялся).
+    recent: HashMap<(bool, u16, u16, u32), (Instant, u32)>,
+    /// Адреса, к которым недавно шёл обход: QUIC к ним режем, даже если имя не разобрать.
+    quic_ips: HashMap<u128, Instant>,
+    trial: Trial,
     /// autottl: TTL из SYN-ACK по адресу сервера.
     server_ttl: HashMap<u128, (u8, Instant)>,
     packets: u64,
@@ -257,20 +303,38 @@ fn pass(data: &[u8], addr: &[u8]) -> Outgoing {
     Outgoing { data: data.to_vec(), addr: addr.to_vec(), modified: false }
 }
 
+/// Без «случайных фейков» все фейки идут к google.com.
+fn fix_fakes(s: &mut Strategy) {
+    for step in &mut s.steps {
+        if let Desync::Fake { sni, .. } = step {
+            *sni = FakeSni::Fixed("www.google.com".into());
+        }
+    }
+}
+
 impl Processor {
     pub fn new(mut cfg: RunConfig, stats: Arc<Counters>) -> Self {
         if !cfg.random_fakes {
             for r in &mut cfg.rules {
-                for s in &mut r.strategy.steps {
-                    if let Desync::Fake { sni, .. } = s {
-                        *sni = FakeSni::Fixed("www.google.com".into());
-                    }
-                }
+                fix_fakes(&mut r.strategy);
+                r.fallbacks.iter_mut().for_each(fix_fakes);
             }
         }
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
         let seed = now.as_nanos() as u64 ^ 0x2545_f491_4f6c_dd1d ^ std::process::id() as u64;
-        Processor { cfg, stats, held: HeldMap::default(), flows: HashMap::new(), recent: HashMap::new(), server_ttl: HashMap::new(), packets: 0, seed, trace: None }
+        Processor {
+            cfg,
+            stats,
+            held: HeldMap::default(),
+            flows: HashMap::new(),
+            recent: HashMap::new(),
+            quic_ips: HashMap::new(),
+            trial: Trial::default(),
+            server_ttl: HashMap::new(),
+            packets: 0,
+            seed,
+            trace: None,
+        }
     }
 
     fn flow_index(&mut self, key: (u8, bool, u16, u16, u128), now: Instant) -> u32 {
@@ -288,7 +352,8 @@ impl Processor {
         self.packets += 1;
         if self.packets % 2048 == 0 {
             self.flows.retain(|_, v| now - v.1 < Duration::from_secs(120));
-            self.recent.retain(|_, t| now - *t < Duration::from_secs(20));
+            self.recent.retain(|_, v| now - v.0 < Duration::from_secs(20));
+            self.quic_ips.retain(|_, t| now - *t < QUIC_IP_TTL);
             self.server_ttl.retain(|_, v| now - v.1 < Duration::from_secs(600));
         }
     }
@@ -361,12 +426,46 @@ impl Processor {
         self.held.clone()
     }
 
+    /// Пробная стратегия, если сайт из пресета на пробе: (пресет, стратегия, ip_id_zero).
+    fn trial_for(&self, host: &str) -> Option<(String, Option<Strategy>, bool)> {
+        let host = host.to_ascii_lowercase();
+        let t = self.trial.lock().unwrap();
+        let t = t.as_ref()?;
+        if self.cfg.is_excluded(&host) || !t.domains.iter().any(|d| host_matches(&host, d)) {
+            return None;
+        }
+        let mut s = t.strategy.clone();
+        if !self.cfg.random_fakes {
+            s.iter_mut().for_each(fix_fakes);
+        }
+        Some((t.preset_id.clone(), s, t.ip_id_zero))
+    }
+
+    /// QUIC к нашим сайтам отбрасываем: браузер через мгновение перейдёт на TCP, где работает обход.
+    /// Имя сайта берём из Initial (ключи выводятся из самого пакета), так что QUIC режется
+    /// и к кэшам YouTube у провайдера, и к SoundCloud, а VPN на UDP 443 не трогаем.
+    fn quic_should_drop(&mut self, pkt: &[u8], now: Instant) -> bool {
+        let dst = packet::dst_ip(pkt);
+        if self.cfg.is_google(dst) || dst.is_some_and(|ip| self.quic_ips.get(&ip).is_some_and(|t| now - *t < QUIC_IP_TTL)) {
+            return true;
+        }
+        let Some(u) = packet::parse_udp(pkt) else { return false };
+        let Some(host) = crate::quic::initial_sni(&pkt[u.payload_off()..]) else { return false };
+        let hit = self.trial_for(&host).is_some() || self.cfg.rule_index(&host).is_some();
+        if hit {
+            if let Some(ip) = dst {
+                self.quic_ips.insert(ip, now);
+            }
+            self.log(|| format!("QUIC {host} → отброшен, браузер уйдёт на TCP"));
+        }
+        hit
+    }
+
     pub fn handle(&mut self, pkt: &[u8], addr: &[u8]) -> Vec<Outgoing> {
         let mut out = Vec::new();
         let now = Instant::now();
 
-        // QUIC отбрасываем: браузер через ~секунду перейдёт на TCP, где работает обход.
-        if self.cfg.block_quic && packet::is_quic(pkt) && self.cfg.is_google(packet::dst_ip(pkt)) {
+        if self.cfg.block_quic && packet::is_quic(pkt) && self.quic_should_drop(pkt, now) {
             self.stats.quic_blocked.fetch_add(1, Relaxed);
             return out;
         }
@@ -437,25 +536,57 @@ impl Processor {
     /// Применить стратегию, если сайт из наших списков. `None` — не трогаем.
     fn try_desync(&mut self, pkt: &[u8], info: &TcpInfo, payload: &[u8], addr: &[u8]) -> Option<Vec<Outgoing>> {
         let host = tls::parse_sni(payload).map(|s| s.host).or_else(|| http::parse_host(payload).map(|h| h.host))?;
-        let rule = self.cfg.rule_for(&host)?;
-        let ip_id_zero = rule.ip_id_zero;
+        let trial = self.trial_for(&host);
+        let idx = match trial {
+            Some(_) => None,
+            None => Some(self.cfg.rule_index(&host)?),
+        };
+        if let Some((preset, None, _)) = &trial {
+            self.log(|| format!("{host} → {preset} / проба без обхода"));
+            return None;
+        }
+        let (preset_id, ip_id_zero) = match (&trial, idx) {
+            (Some((p, _, z)), _) => (p.clone(), *z),
+            (None, Some(i)) => (self.cfg.rules[i].preset_id.clone(), self.cfg.rules[i].ip_id_zero),
+            _ => return None,
+        };
         // Самолечение: тот же ClientHello (тот же seq) пришёл снова — значит, прошлый не прошёл.
-        let retrans = {
+        let tries = {
             let now = Instant::now();
             let rkey = (info.v6, info.src_port, info.dst_port, info.seq);
-            let retrans = self.recent.get(&rkey).is_some_and(|t| now - *t < Duration::from_secs(15));
-            self.recent.insert(rkey, now);
+            let tries = self.recent.get(&rkey).filter(|(t, _)| now - *t < Duration::from_secs(15)).map_or(0, |(_, n)| n + 1);
+            self.recent.insert(rkey, (now, tries));
             let mut h = self.stats.health.lock().unwrap();
-            let e = h.entry(rule.preset_id.clone()).or_insert((0, 0));
+            let e = h.entry(preset_id.clone()).or_insert((0, 0));
             e.0 += 1;
-            if retrans {
+            if tries > 0 {
                 e.1 += 1;
             }
-            retrans
+            tries
         };
+        let retrans = tries > 0;
+        // Повтор спасаем сразу: шлём его следующей стратегией пресета, не дожидаясь переподбора.
+        let (strategy, rescue) = match (trial, idx) {
+            (Some((_, Some(s), _)), _) => (s, false),
+            (None, Some(i)) => {
+                let r = &self.cfg.rules[i];
+                if retrans && !r.fallbacks.is_empty() {
+                    (r.fallbacks[(tries as usize - 1) % r.fallbacks.len()].clone(), true)
+                } else {
+                    (r.strategy.clone(), false)
+                }
+            }
+            _ => return None,
+        };
+        if rescue {
+            self.stats.rescued.fetch_add(1, Relaxed);
+        }
+        if let Some(ip) = packet::dst_ip(pkt) {
+            self.quic_ips.insert(ip, Instant::now());
+        }
         self.seed = self.seed.wrapping_mul(6364136223846793005).wrapping_add(info.seq as u64 | 1);
-        let mut plan = strategy::plan(payload, &rule.strategy, self.seed);
-        let auto = rule.strategy.steps.iter().find_map(|s| match s {
+        let mut plan = strategy::plan(payload, &strategy, self.seed);
+        let auto = strategy.steps.iter().find_map(|s| match s {
             Desync::AutoTtl { delta, min, max } => Some((*delta, *min, *max)),
             _ => None,
         });
@@ -475,12 +606,16 @@ impl Processor {
         let segs = split_oversized(plan.segments);
         self.log(|| {
             let fakes = segs.iter().filter(|s| s.kind == SegKind::Fake).count();
-            let fail = if retrans { " · ПОВТОР — прошлый не прошёл" } else { "" };
+            let fail = match (retrans, rescue) {
+                (true, true) => " · ПОВТОР — прошлый не прошёл, спасаем запасной",
+                (true, false) => " · ПОВТОР — прошлый не прошёл",
+                _ => "",
+            };
             let parts = segs.len() - fakes;
             format!(
                 "{host} → {} / {} · {fakes} {} + {parts} {}{fail}",
-                rule.preset_id,
-                rule.strategy.name,
+                preset_id,
+                strategy.name,
                 ru_plural(fakes, ["фейк", "фейка", "фейков"]),
                 ru_plural(parts, ["часть", "части", "частей"]),
             )
@@ -577,10 +712,16 @@ pub struct Engine {
     started: Option<Instant>,
     stats: Arc<Counters>,
     error: Arc<Mutex<Option<String>>>,
+    trial: Trial,
     pub trace: Option<Trace>,
 }
 
 impl Engine {
+    /// Поставить (или снять) пробную стратегию пресета прямо в работающем движке.
+    pub fn set_trial(&self, t: Option<TrialRule>) {
+        *self.trial.lock().unwrap() = t;
+    }
+
     pub fn start(&mut self, cfg: RunConfig, io: Arc<dyn PacketIo>) {
         // Перезапуск с новыми настройками — продолжение той же сессии: время и счётчики не сбрасываем.
         let resumed = self.started.filter(|_| self.error.lock().unwrap().is_none());
@@ -592,6 +733,7 @@ impl Engine {
         self.presets = cfg.rules.iter().map(|r| r.preset_id.clone()).collect();
         let mut proc = Processor::new(cfg, self.stats.clone());
         proc.trace = self.trace.clone();
+        proc.trial = self.trial.clone();
         let (held, io3, stop) = (proc.held(), io.clone(), Arc::new(AtomicBool::new(false)));
         let stop2 = stop.clone();
         let watchdog = std::thread::Builder::new()
@@ -664,6 +806,8 @@ impl Engine {
                 fakes_sent: self.stats.fakes_sent.load(Relaxed),
                 uptime_secs: if running { self.started.map(|t| t.elapsed().as_secs()).unwrap_or(0) } else { 0 },
                 last_host: self.stats.last_host.lock().unwrap().clone(),
+                quic_blocked: self.stats.quic_blocked.load(Relaxed),
+                rescued: self.stats.rescued.load(Relaxed),
             },
             demo: false,
         }
@@ -897,6 +1041,54 @@ mod tests {
         p.handle(&pkt, &[0; 80]);
         p.handle(&pkt, &[0; 80]); // повтор того же seq
         assert_eq!(stats.health.lock().unwrap().get("youtube"), Some(&(2, 1)));
+    }
+
+    #[test]
+    fn retransmit_is_rescued_with_fallback_strategy() {
+        let s = Settings { enabled_presets: vec!["youtube".into()], ..Default::default() };
+        let cfg = RunConfig::from_settings(&s);
+        assert_eq!(cfg.rules[0].fallbacks.len(), MAX_FALLBACKS);
+        assert!(cfg.rules[0].fallbacks.iter().all(|f| f.id != cfg.rules[0].strategy.id));
+        let stats = Arc::new(Counters::default());
+        let mut p = Processor::new(cfg, stats.clone());
+        let pkt = make_v4(&tls::build_client_hello("rr2---sn-4g5e6nzz.googlevideo.com"), 4242);
+        let first = p.handle(&pkt, &[0; 80]);
+        let second = p.handle(&pkt, &[0; 80]);
+        assert_eq!(stats.rescued.load(Relaxed), 1);
+        assert_ne!(first.len(), second.len(), "повтор ушёл другой стратегией");
+        // Настоящие данные в повторе те же самые.
+        assert_eq!(reassemble(&second).len(), pkt.len() - packet::parse_tcp(&pkt).unwrap().payload_off());
+    }
+
+    #[test]
+    fn trial_strategy_changes_on_the_fly_and_other_presets_keep_working() {
+        let s = Settings { enabled_presets: vec!["youtube".into(), "discord".into()], ..Default::default() };
+        let cfg = RunConfig::from_settings(&s);
+        let mut p = Processor::new(cfg, Arc::new(Counters::default()));
+        let yt = make_v4(&tls::build_client_hello("www.youtube.com"), 10);
+        let dc = make_v4(&tls::build_client_hello("discord.com"), 20);
+        *p.trial.lock().unwrap() = RunConfig::trial_rule(&s, "youtube", None);
+        let out = p.handle(&yt, &[0; 80]);
+        assert!(out.len() == 1 && !out[0].modified, "проба «без обхода» пропускает YouTube как есть");
+        assert!(p.handle(&dc, &[0; 80]).iter().all(|o| o.modified), "Discord в это время обрабатывается");
+        let ttl = crate::base::strategies().into_iter().find(|x| x.id == "fake_ttl_split");
+        *p.trial.lock().unwrap() = RunConfig::trial_rule(&s, "youtube", ttl);
+        let out = p.handle(&make_v4(&tls::build_client_hello("www.youtube.com"), 30), &[0; 80]);
+        assert!(out.iter().any(|o| o.data[8] == 4), "пробная стратегия (фейк с TTL 4) применилась");
+    }
+
+    #[test]
+    fn quic_is_dropped_by_sni_to_any_address() {
+        use crate::packet::tests::make_udp4;
+        let s = Settings { enabled_presets: vec!["youtube".into()], ..Default::default() };
+        let mut p = Processor::new(RunConfig::from_settings(&s), Arc::new(Counters::default()));
+        // Кэш YouTube у провайдера: адрес не из сетей Google, но имя — googlevideo.
+        let cache = [5, 6, 7, 8];
+        let yt = make_udp4(&crate::quic::build_initial("rr1---sn-n8v7kn7k.googlevideo.com", &[3; 64]), cache, 443);
+        assert!(p.handle(&yt, &[0; 80]).is_empty(), "QUIC к кэшу YouTube отбрасываем");
+        assert!(p.handle(&make_udp4(&[0x40; 60], cache, 443), &[0; 80]).is_empty(), "и остальной QUIC к нему");
+        let other = make_udp4(&crate::quic::build_initial("vpn.example.org", &[4; 64]), [9, 9, 9, 9], 443);
+        assert_eq!(p.handle(&other, &[0; 80]).len(), 1, "QUIC к чужим сайтам и VPN не трогаем");
     }
 
     #[test]

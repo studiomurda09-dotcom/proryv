@@ -28,7 +28,14 @@ pub fn test_urls(preset_id: &str) -> Vec<&'static str> {
             "https://gateway.discord.gg/",
         ],
         "roblox" => vec!["https://www.roblox.com/", "https://setup.rbxcdn.com/version"],
-        "general" => vec!["https://rutracker.org/forum/index.php", "https://soundcloud.com/", "https://medium.com/"],
+        // Сайт, API, обложки/скрипты и сам аудиопоток (HLS идёт с soundcloud.cloud).
+        "soundcloud" => vec![
+            "https://soundcloud.com/",
+            "https://api-v2.soundcloud.com/",
+            "https://a-v2.sndcdn.com/",
+            "https://playback.media-streaming.soundcloud.cloud/",
+        ],
+        "general" => vec!["https://rutracker.org/forum/index.php", "https://medium.com/", "https://archive.org/"],
         "social" => vec!["https://www.instagram.com/", "https://x.com/", "https://www.facebook.com/"],
         _ => vec![],
     }
@@ -85,6 +92,66 @@ pub fn curl_check(url: &str, iface: Option<&str>, timeout_s: u32) -> Check {
     Check { url: url.to_string(), ok: err == 0 && code > 0, code, ms, curl_error: err }
 }
 
+/// Замер скорости «как у видео». Видео YouTube идёт с `rrN---sn-….googlevideo.com`,
+/// и DPI тормозит именно эти соединения. Настоящий адрес видео без подписи не скачать,
+/// поэтому соединяемся с фронтендом Google под именем видеосервера (SNI googlevideo.com —
+/// его видит DPI и наш движок), а внутри просим обычный файл www.gstatic.com (~430 КБ).
+pub struct SpeedProbe {
+    pub url: &'static str,
+    pub connect_to: &'static str,
+    pub host: &'static str,
+}
+
+/// Тот же файл напрямую с www.gstatic.com — его не тормозят, это «скорость канала».
+pub const REF_SPEED: SpeedProbe =
+    SpeedProbe { url: "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js", connect_to: "", host: "" };
+
+pub fn speed_probe(preset_id: &str) -> Option<SpeedProbe> {
+    (preset_id == "youtube").then_some(SpeedProbe {
+        url: "https://rr4---sn-4g5e6nzz.googlevideo.com/firebasejs/10.12.0/firebase-firestore.js",
+        connect_to: "::www.gstatic.com:",
+        host: "www.gstatic.com",
+    })
+}
+
+/// Скорость скачивания, байт/с. `None` — замер не удался по нашей вине (сервер ответил
+/// не тем), `Some(0)` — соединение не прошло.
+pub fn speed_check(p: &SpeedProbe, iface: Option<&str>) -> Option<u64> {
+    let mut cmd = Command::new("curl.exe");
+    cmd.args(["-s", "-o", "NUL", "-m", "6", "--connect-timeout", "5", "-w", "%{http_code} %{size_download} %{time_total}"]);
+    if !p.connect_to.is_empty() {
+        cmd.args(["--connect-to", p.connect_to, "-H", &format!("Host: {}", p.host)]);
+    }
+    if let Some(ip) = iface {
+        cmd.args(["--interface", ip]);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    let o = cmd.arg(p.url).output().ok()?;
+    let s = String::from_utf8_lossy(&o.stdout);
+    let mut it = s.split_whitespace();
+    let code: u16 = it.next()?.parse().ok()?;
+    let size: f64 = it.next()?.parse().ok()?;
+    let secs: f64 = it.next()?.parse().ok()?;
+    match code {
+        0 => Some(0),
+        // 200 — скачали; таймаут посреди файла (curl 28) — тоже замер, просто медленный.
+        200 if secs > 0.0 => Some((size / secs) as u64),
+        _ => None,
+    }
+}
+
+/// «Медленно»: скорость видео меньше трети скорости канала.
+pub fn is_slow(speed: Option<u64>, reference: Option<u64>) -> bool {
+    match (speed, reference) {
+        (Some(v), Some(r)) => r > 0 && v * 3 < r,
+        _ => false,
+    }
+}
+
 /// Удаётся ли открыть TCP-соединение на 443 порт. curl telnet:// после соединения
 /// ждёт данных до таймаута, поэтому смотрим на time_connect, а не на код выхода.
 pub fn tcp_connects(ip: &str, iface: Option<&str>) -> bool {
@@ -134,6 +201,8 @@ pub struct Progress {
     pub of: usize,
     pub ms: u64,
     pub done: bool,
+    /// Скорость «как у видео», байт/с (только YouTube).
+    pub speed: Option<u64>,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -146,28 +215,61 @@ pub struct Outcome {
     pub best_name: Option<String>,
     pub results: Vec<Progress>,
     pub direct_ip: Option<String>,
+    /// Скорость канала (тот же файл без торможения), байт/с.
+    pub ref_speed: Option<u64>,
 }
 
-/// Включить одну стратегию на время проверки и открыть адреса пресета.
-fn try_strategy(preset_id: &str, sid: &str, base: &Settings, urls: &[&str], iface: Option<&str>) -> Result<(usize, u64), String> {
-    let s = Settings {
-        enabled_presets: vec![preset_id.to_string()],
-        strategy_override: vec![(preset_id.to_string(), sid.to_string())],
-        custom_domains: base.custom_domains.clone(),
-        excluded_domains: base.excluded_domains.clone(),
-        random_fakes: base.random_fakes,
-        block_quic: base.block_quic,
-        ..Default::default()
-    };
-    let cfg = RunConfig::from_settings(&s);
-    let filter: Filter = cfg.filter();
-    let io = platform::open_default(&filter).map_err(|e| e.to_string())?;
-    let mut engine = Engine::default();
-    engine.start(cfg, io);
-    std::thread::sleep(Duration::from_millis(250));
-    let (ok, ms, _) = check_all(urls, iface);
-    engine.stop();
-    Ok((ok, ms))
+/// Как включать стратегию на время проверки.
+pub trait Trial {
+    /// `sid: None` — сайты пресета без обхода (замер «как есть»).
+    fn apply(&mut self, preset_id: &str, sid: Option<&str>) -> Result<(), String>;
+}
+
+/// Отдельный движок только для проверяемого пресета — когда основной выключен.
+pub struct OwnEngine {
+    base: Settings,
+    engine: Option<Engine>,
+}
+
+impl OwnEngine {
+    pub fn new(base: &Settings) -> Self {
+        OwnEngine { base: base.clone(), engine: None }
+    }
+}
+
+impl Trial for OwnEngine {
+    fn apply(&mut self, preset_id: &str, sid: Option<&str>) -> Result<(), String> {
+        if let Some(mut e) = self.engine.take() {
+            e.stop();
+        }
+        let Some(sid) = sid else { return Ok(()) };
+        let s = Settings {
+            enabled_presets: vec![preset_id.to_string()],
+            strategy_override: vec![(preset_id.to_string(), sid.to_string())],
+            custom_domains: self.base.custom_domains.clone(),
+            excluded_domains: self.base.excluded_domains.clone(),
+            random_fakes: self.base.random_fakes,
+            block_quic: self.base.block_quic,
+            ..Default::default()
+        };
+        let cfg = RunConfig::from_settings(&s);
+        let filter: Filter = cfg.filter();
+        let io = platform::open_default(&filter).map_err(|e| e.to_string())?;
+        let mut engine = Engine::default();
+        engine.start(cfg, io);
+        self.engine = Some(engine);
+        std::thread::sleep(Duration::from_millis(250));
+        Ok(())
+    }
+}
+
+/// Открыть адреса и замерить скорость — всё параллельно.
+fn measure(urls: &[&str], probe: Option<&SpeedProbe>, iface: Option<&str>) -> (usize, u64, Option<u64>) {
+    std::thread::scope(|s| {
+        let speed = probe.map(|p| s.spawn(move || speed_check(p, iface)));
+        let (ok, ms, _) = check_all(urls, iface);
+        (ok, ms, speed.and_then(|j| j.join().ok().flatten()))
+    })
 }
 
 /// Проверить одну стратегию на пресете (кнопка «Проверить» в режиме разработчика).
@@ -182,68 +284,99 @@ pub fn check_one(preset_id: &str, sid: &str, base: &Settings) -> Result<(usize, 
     let iface = platform::windivert::direct_source_ip();
     #[cfg(not(windows))]
     let iface: Option<String> = None;
-    let (ok, _) = try_strategy(preset_id, sid, base, &urls, iface.as_deref())?;
+    let mut own = OwnEngine::new(base);
+    own.apply(preset_id, Some(sid))?;
+    let (ok, _, _) = check_all(&urls, iface.as_deref());
+    own.apply(preset_id, None)?;
     Ok((ok, urls.len()))
 }
 
-/// Перебрать стратегии пресета и найти лучшую.
-/// Основной движок на время подбора должен быть остановлен.
-pub fn run(preset_id: &str, base: &Settings, mut on_progress: impl FnMut(&Progress)) -> Result<Outcome, String> {
+/// Скорость считается хорошей, если не меньше половины скорости канала.
+fn fast_enough(speed: Option<u64>, reference: Option<u64>) -> bool {
+    match (speed, reference) {
+        (Some(v), Some(r)) => v * 2 >= r,
+        (Some(0), None) => false,
+        _ => true,
+    }
+}
+
+/// Перебрать стратегии пресета и найти лучшую. `prefer` — те, что уже работали
+/// (в этой сети), их пробуем первыми. `trial` включает каждую стратегию на время проверки.
+pub fn run(
+    preset_id: &str,
+    base: &Settings,
+    prefer: &[String],
+    trial: &mut dyn Trial,
+    mut on_progress: impl FnMut(&Progress),
+) -> Result<Outcome, String> {
     let preset = crate::base::presets().into_iter().find(|p| p.id == preset_id).ok_or("неизвестный пресет")?;
     let urls = urls_for(preset_id, base);
     let urls: Vec<&str> = urls.iter().map(String::as_str).collect();
     if urls.is_empty() {
         return Err(if preset_id == "universal" { "добавьте сайты в «Свои домены»".into() } else { "для этого пресета нет адресов проверки".into() });
     }
-    let names: std::collections::HashMap<String, String> =
-        crate::base::strategies().into_iter().map(|s| (s.id, s.name)).collect();
+    let all = crate::base::strategies();
+    let names: std::collections::HashMap<String, String> = all.iter().map(|s| (s.id.clone(), s.name.clone())).collect();
 
     #[cfg(windows)]
     let iface = platform::windivert::direct_source_ip();
     #[cfg(not(windows))]
     let iface: Option<String> = None;
+    let probe = speed_probe(preset_id);
 
     // Для своих доменов перебираем все стратегии: ищем одну, которая откроет больше всего сайтов.
-    let order: Vec<String> = if preset_id == "universal" {
-        let mut v = preset.strategies.clone();
-        for id in crate::base::strategies().into_iter().map(|s| s.id) {
-            if !v.contains(&id) && id != "http_hostcase" {
-                v.push(id);
-            }
-        }
-        v
-    } else {
-        preset.strategies.clone()
-    };
+    let mut order: Vec<String> = prefer.iter().filter(|id| names.contains_key(*id)).cloned().collect();
+    order.extend(preset.strategies.iter().cloned());
+    if preset_id == "universal" {
+        order.extend(all.iter().map(|s| s.id.clone()).filter(|id| id != "http_hostcase"));
+    }
+    let mut seen = std::collections::HashSet::new();
+    order.retain(|id| seen.insert(id.clone()));
     let total = order.len() + 1;
     let mut results = Vec::new();
 
-    let (base_ok, base_ms, _) = check_all(&urls, iface.as_deref());
+    trial.apply(preset_id, None)?;
+    let ref_speed = probe.as_ref().and_then(|_| speed_check(&REF_SPEED, iface.as_deref()));
+    let (base_ok, base_ms, base_speed) = measure(&urls, probe.as_ref(), iface.as_deref());
     let p = Progress {
         preset: preset_id.into(), strategy: "baseline".into(), strategy_name: "Без обхода".into(),
-        index: 0, total, ok: base_ok, of: urls.len(), ms: base_ms, done: false,
+        index: 0, total, ok: base_ok, of: urls.len(), ms: base_ms, done: false, speed: base_speed,
     };
     on_progress(&p);
     results.push(p);
 
     for (i, sid) in order.iter().enumerate() {
-        let (ok, ms) = try_strategy(preset_id, sid, base, &urls, iface.as_deref())?;
+        trial.apply(preset_id, Some(sid))?;
+        let (ok, ms, speed) = measure(&urls, probe.as_ref(), iface.as_deref());
         let p = Progress {
             preset: preset_id.into(), strategy: sid.clone(), strategy_name: names.get(sid).cloned().unwrap_or_default(),
-            index: i + 1, total, ok, of: urls.len(), ms, done: false,
+            index: i + 1, total, ok, of: urls.len(), ms, done: false, speed,
         };
         on_progress(&p);
         results.push(p);
-        // Всё открылось быстро — дальше можно не искать.
-        if ok == urls.len() && ms < 3000 {
-            break;
+        // Всё открылось быстро — проверяем ещё раз (одна удача бывает случайной) и заканчиваем.
+        if ok == urls.len() && ms < 3000 && fast_enough(speed, ref_speed) {
+            let (ok2, _, speed2) = measure(&urls, probe.as_ref(), iface.as_deref());
+            if ok2 == urls.len() && fast_enough(speed2, ref_speed) {
+                break;
+            }
+            // Повтор не прошёл — засчитываем худший из двух замеров и ищем дальше.
+            if let Some(last) = results.last_mut() {
+                last.ok = ok2;
+                last.speed = speed2;
+            }
         }
     }
+    trial.apply(preset_id, None)?;
 
+    // Скорость сравниваем грубо (шаг 200 КБ/с), чтобы шум замера не решал за открывшиеся сайты.
+    let bucket = |r: &Progress| r.speed.map_or(0, |v| v / 200_000);
     let best = results
         .iter()
-        .filter(|r| r.strategy != "baseline" && r.ok > base_ok)
-        .max_by(|a, b| a.ok.cmp(&b.ok).then(b.ms.cmp(&a.ms)))
+        .filter(|r| r.strategy != "baseline")
+        // Лучше, чем без обхода: открылось больше сайтов или всё открылось и так, но видео заметно быстрее.
+        .filter(|r| r.ok > base_ok || (r.ok == base_ok && r.ok > 0 && r.speed.unwrap_or(0) > base_speed.unwrap_or(u64::MAX).saturating_mul(2)))
+        .max_by(|a, b| a.ok.cmp(&b.ok).then(bucket(a).cmp(&bucket(b))).then(b.ms.cmp(&a.ms)))
         .map(|r| (r.strategy.clone(), r.strategy_name.clone()));
     Ok(Outcome {
         preset: preset_id.into(),
@@ -253,6 +386,7 @@ pub fn run(preset_id: &str, base: &Settings, mut on_progress: impl FnMut(&Progre
         best: best.map(|b| b.0),
         results,
         direct_ip: iface,
+        ref_speed,
     })
 }
 

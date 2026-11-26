@@ -1,6 +1,9 @@
 //! Оболочка Tauri: окно, трей, автозапуск, команды для интерфейса.
 
+mod heal;
+
 use std::{
+    collections::{HashMap, VecDeque},
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -9,7 +12,7 @@ use std::{
 };
 
 use proryv_core::{
-    autotune::{self, Diagnosis, Outcome, Progress},
+    autotune::{self, Diagnosis},
     base,
     config::Settings,
     engine::{Engine, EngineState, RunConfig, Status, Trace},
@@ -35,6 +38,10 @@ struct AppState {
     tg_error: Mutex<Option<String>>,
     /// Журнал движка для вкладки «Разработчик» (пишется, только когда режим включён).
     trace: Trace,
+    /// История самолечения и подборов (новые сверху).
+    heal_log: Mutex<VecDeque<heal::HealEvent>>,
+    /// Последняя проверка сторожа по пресетам.
+    watch: Mutex<HashMap<String, heal::PresetHealth>>,
 }
 
 /// Блокировка, которая переживает панику другого потока: иначе одна ошибка
@@ -286,13 +293,29 @@ fn get_bootstrap(state: State<AppState>) -> Bootstrap {
 
 #[tauri::command(async)]
 fn save_settings(state: State<AppState>, mut settings: Settings) -> Result<(), String> {
-    let (old_autostart, old_secret, same_bypass) = {
+    let (old_autostart, old_secret, same_bypass, known_good, old_override) = {
         let s = state.settings.lk();
-        (s.autostart, s.telegram_secret.clone(), s.same_bypass(&settings))
+        (s.autostart, s.telegram_secret.clone(), s.same_bypass(&settings), s.known_good.clone(), s.strategy_override.clone())
     };
     // Секрет Telegram создаётся на стороне приложения — интерфейс мог прислать старый пустой.
     if settings.telegram_secret.len() != 32 {
         settings.telegram_secret = old_secret;
+    }
+    // Рабочие стратегии по сетям ведёт самолечение — у интерфейса может быть старый список.
+    settings.known_good = known_good;
+    // Стратегию выбрали вручную — это и есть рабочая для текущей сети (иначе при смене сети
+    // или перезапуске память сетей вернула бы старую). Вернули «Авто» — забываем.
+    let net = heal::net_key();
+    let pick = |v: &[(String, String)], p: &str| v.iter().find(|(id, _)| id == p).map(|(_, s)| s.clone());
+    for p in settings.enabled_presets.clone() {
+        let new = pick(&settings.strategy_override, &p);
+        if new == pick(&old_override, &p) {
+            continue;
+        }
+        match new {
+            Some(sid) => settings.remember_good(&net, &p, &sid),
+            None => settings.known_good.retain(|k| !(k.net == net && k.preset == p)),
+        }
     }
     settings.save(&state.settings_path).map_err(|e| e.to_string())?;
     let autostart = settings.autostart;
@@ -392,151 +415,6 @@ fn tunnel_interfaces() -> Vec<String> {
 #[tauri::command]
 async fn diagnose(host: String) -> Diagnosis {
     tauri::async_runtime::spawn_blocking(move || autotune::diagnose(&host)).await.expect("diagnose")
-}
-
-#[derive(Serialize, Clone)]
-struct TuneDone {
-    /// "manual" — кнопка, "heal" — самолечение.
-    source: &'static str,
-    result: Result<Outcome, String>,
-}
-
-/// Подбор в текущем потоке: остановить движок, перебрать, сохранить лучшую, вернуть движок.
-fn run_tune(app: &AppHandle, preset: &str, source: &'static str) {
-    let state = app.state::<AppState>();
-    let was_running = is_running(&state);
-    state.engine.lk().pause();
-    let base = state.settings.lk().clone();
-    let res: Result<Outcome, String> = autotune::run(preset, &base, |p: &Progress| {
-        if source == "manual" {
-            let _ = app.emit("autotune", p);
-        }
-    });
-    if let Ok(out) = &res {
-        if let Some(best) = &out.best {
-            let mut s = state.settings.lk();
-            s.strategy_override.retain(|(p, _)| p != preset);
-            s.strategy_override.push((preset.to_string(), best.clone()));
-            let _ = s.save(&state.settings_path);
-        }
-    }
-    if was_running {
-        start_engine(&state);
-    }
-    state.autotune_running.store(false, Ordering::SeqCst);
-    if source == "heal" {
-        let en = is_en(&state);
-        let name = preset_title(preset, en);
-        match res.as_ref().ok().and_then(|o| o.best.as_ref().map(|b| (b, &o.best_name))) {
-            Some((id, ru_name)) => notify(
-                app,
-                ("Самолечение", "Self-healing"),
-                (
-                    format!("{name} перестал открываться — переключили на «{}».", ru_name.as_deref().unwrap_or(id)),
-                    format!("{name} stopped opening — switched to strategy {id}."),
-                ),
-            ),
-            None => notify(
-                app,
-                ("Самолечение", "Self-healing"),
-                (
-                    format!("{name} перестал открываться, а новая стратегия не нашлась. Попробуйте автоподбор или «Диагностику»."),
-                    format!("{name} stopped opening and no new strategy was found. Try auto-tune or Diagnostics."),
-                ),
-            ),
-        }
-    }
-    let _ = app.emit("autotune-done", TuneDone { source, result: res });
-}
-
-/// Запустить автоподбор в фоне. Прогресс — события "autotune", итог — "autotune-done".
-#[tauri::command]
-fn autotune_start(app: AppHandle, preset: String) -> Result<(), String> {
-    let state = app.state::<AppState>();
-    if state.autotune_running.swap(true, Ordering::SeqCst) {
-        return Err("Подбор уже идёт".into());
-    }
-    std::thread::spawn(move || run_tune(&app, &preset, "manual"));
-    Ok(())
-}
-
-/// Самолечение: раз в 20 с смотрим долю повторных ClientHello по пресетам.
-/// Если за окно много повторов (соединения не проходят) — тихо переподбираем стратегию.
-/// Плюс сторож: раз в 5 минут сам открывает адреса проверки включённых пресетов —
-/// так поломка находится, даже если сайтом сейчас никто не пользуется.
-fn spawn_healer(app: AppHandle) {
-    std::thread::spawn(move || {
-        use std::{collections::HashMap, time::{Duration, Instant}};
-        let mut prev: HashMap<String, (u64, u64)> = HashMap::new();
-        let mut last_heal: HashMap<String, Instant> = HashMap::new();
-        let mut last_watch = Instant::now();
-        loop {
-            std::thread::sleep(Duration::from_secs(20));
-            let state = app.state::<AppState>();
-            let settings = state.settings.lk().clone();
-            if !settings.auto_heal || state.autotune_running.load(Ordering::SeqCst) || !is_running(&state) {
-                prev.clear();
-                continue;
-            }
-            let cooled = |p: &str| last_heal.get(p).is_none_or(|t| t.elapsed() > Duration::from_secs(15 * 60));
-            let now_h = state.engine.lk().health();
-            let mut target = None;
-            for (preset, (d, r)) in &now_h {
-                let (pd, pr) = prev.get(preset).copied().unwrap_or((0, 0));
-                let (dd, dr) = (d.saturating_sub(pd), r.saturating_sub(pr));
-                // ≥4 повторов и не меньше трети всех соединений за окно.
-                if dr >= 4 && dr * 3 >= dd && cooled(preset) && !autotune::urls_for(preset, &settings).is_empty() {
-                    target = Some(preset.clone());
-                    break;
-                }
-            }
-            prev = now_h;
-            if target.is_none() && last_watch.elapsed() > Duration::from_secs(5 * 60) {
-                last_watch = Instant::now();
-                target = watch_presets(&settings).into_iter().find(|p| cooled(p));
-            }
-            if let Some(preset) = target {
-                #[cfg(windows)]
-                let iface = platform::windivert::direct_source_ip();
-                #[cfg(not(windows))]
-                let iface: Option<String> = None;
-                // Нет сети вообще — обход не виноват, подбирать нечего.
-                if !autotune::internet_ok(iface.as_deref()) {
-                    prev.clear();
-                    continue;
-                }
-                if state.autotune_running.swap(true, Ordering::SeqCst) {
-                    continue;
-                }
-                last_heal.insert(preset.clone(), Instant::now());
-                let _ = app.emit("heal-start", &preset);
-                run_tune(&app, &preset, "heal");
-                prev.clear();
-            }
-        }
-    });
-}
-
-/// Пресеты, у которых сейчас открывается меньше половины адресов проверки.
-fn watch_presets(settings: &Settings) -> Vec<String> {
-    #[cfg(windows)]
-    let iface = platform::windivert::direct_source_ip();
-    #[cfg(not(windows))]
-    let iface: Option<String> = None;
-    settings
-        .enabled_presets
-        .iter()
-        .filter(|p| {
-            let urls = autotune::urls_for(p, settings);
-            if urls.is_empty() {
-                return false;
-            }
-            let urls: Vec<&str> = urls.iter().map(String::as_str).collect();
-            let (ok, _, _) = autotune::check_all(&urls, iface.as_deref());
-            ok * 2 < urls.len()
-        })
-        .cloned()
-        .collect()
 }
 
 #[derive(Serialize)]
@@ -714,6 +592,7 @@ fn diag_report(state: State<AppState>) -> String {
         format!("{}: v{}", tr("База стратегий", "Strategy base"), base::base().map_or(0, |b| b.version)),
         format!("{}: {:?}{}", tr("Обход", "Bypass"), status.state, status.message.as_ref().map(|m| format!(" — {m}")).unwrap_or_default()),
         format!("{} {} · {} {} · {} {}", tr("Соединений:", "Connections:"), status.stats.connections, tr("обработано:", "processed:"), status.stats.desynced, tr("фейков:", "fakes:"), status.stats.fakes_sent),
+        format!("{} {} · {} {}", tr("QUIC отброшено:", "QUIC dropped:"), status.stats.quic_blocked, tr("спасено запасной стратегией:", "rescued by fallback:"), status.stats.rescued),
         format!("{}: {} · QUIC: {} · Game Filter: {}", tr("Свои домены", "Custom domains"), settings.custom_domains.len(), settings.block_quic, settings.game_filter),
     ];
     let conflicts = check_conflicts();
@@ -739,6 +618,37 @@ fn diag_report(state: State<AppState>) -> String {
             format!(" · {} {ok}/{}{}", tr("открылось", "opened"), urls.len(), if fails.is_empty() { String::new() } else { format!(" · {}: {}", tr("не открылись", "failed"), fails.join(", ")) })
         };
         r.push(format!("[{p}] {name}{}{check}", if chosen.is_some() { "" } else { tr(" (авто)", " (auto)") }));
+    }
+    if settings.enabled_presets.iter().any(|p| p == "youtube") {
+        let probe = autotune::speed_probe("youtube").expect("youtube probe");
+        let (v, rf) = std::thread::scope(|s| {
+            let v = s.spawn(|| autotune::speed_check(&probe, iface.as_deref()));
+            let rf = autotune::speed_check(&autotune::REF_SPEED, iface.as_deref());
+            (v.join().ok().flatten(), rf)
+        });
+        let kb = |x: Option<u64>| x.map_or("—".to_string(), |b| format!("{} KB/s", b / 1024));
+        r.push(format!("{}: {} · {}: {}{}", tr("Скорость видео YouTube", "YouTube video speed"), kb(v), tr("канал", "line"), kb(rf),
+            if autotune::is_slow(v, rf) { tr(" · МЕДЛЕННО", " · SLOW") } else { "" }));
+    }
+    // Сеть — только провайдер (AS), без адресов.
+    let net = heal::net_key();
+    r.push(format!("{}: {}", tr("Сеть для памяти стратегий", "Network for remembered strategies"), if net.starts_with("AS") { net.as_str() } else { tr("по подсети", "by subnet") }));
+    let history = state.heal_log.lk().iter().take(6).cloned().collect::<Vec<_>>();
+    if !history.is_empty() {
+        r.push(tr("Самолечение (новые сверху):", "Self-healing (newest first):").into());
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+        for e in history {
+            r.push(format!(
+                "  -{} {} · [{}] {} · {} · {} → {}",
+                (now.saturating_sub(e.at)) / 60,
+                tr("мин", "min"),
+                e.preset,
+                e.reason,
+                e.result,
+                e.from.as_deref().unwrap_or("—"),
+                e.to.as_deref().unwrap_or("—")
+            ));
+        }
     }
     r.join("
 ")
@@ -787,6 +697,8 @@ fn spawn_base_loader(app: AppHandle, cache: PathBuf) {
         base::set_isp(base::detect_isp());
         BASE_DONE.store(true, Ordering::SeqCst);
         let _ = app.emit("base-updated", isp_info());
+        // Запустились в другой сети, чем в прошлый раз, — берём то, что работало в этой.
+        heal::apply_known(&app);
         // Пресеты поменялись (домены, стратегия провайдера) — применяем без перезапуска программы.
         if (base::presets(), base::strategies()) != before && is_running(&state) && !state.autotune_running.load(Ordering::SeqCst) {
             let _ = app.emit("status", start_engine(&state));
@@ -980,6 +892,8 @@ pub fn run() {
                 tg: Mutex::new(None),
                 tg_error: Mutex::new(None),
                 trace: Trace::default(),
+                heal_log: Mutex::new(VecDeque::new()),
+                watch: Mutex::new(HashMap::new()),
             });
             sync_tg(&app.state::<AppState>());
             spawn_base_loader(app.handle().clone(), app.path().app_config_dir()?.join("base.json"));
@@ -987,7 +901,7 @@ pub fn run() {
             if enable_now {
                 start_engine_notify(app.handle());
             }
-            spawn_healer(app.handle().clone());
+            heal::spawn_healer(app.handle().clone());
             spawn_tray_watch(app.handle().clone());
             Ok(())
         })
@@ -1012,7 +926,10 @@ pub fn run() {
             check_conflicts,
             tunnel_interfaces,
             diagnose,
-            autotune_start,
+            heal::autotune_start,
+            heal::heal_history,
+            heal::preset_health,
+            heal::speed_test,
             set_backdrop,
             system_info,
             relaunch_as_admin,

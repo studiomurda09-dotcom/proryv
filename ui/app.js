@@ -103,6 +103,12 @@ const mockBackend = (() => {
       return [since + n, n ? [`${hosts[since % 4]} → youtube / Fake TS + Overlap (ALT11) · 8 фейков + 2 части`] : []];
     },
     dev_check: () => [6, 6],
+    heal_history: () => [
+      { at: Math.floor(Date.now() / 1000) - 600, preset: 'youtube', reason: 'slow', result: 'fixed', from: 'alt11', to: 'fake_multidisorder' },
+      { at: Math.floor(Date.now() / 1000) - 3000, preset: 'discord', reason: 'watch', result: 'false_alarm', from: 'alt11', to: null },
+    ],
+    preset_health: () => ({ youtube: { ok: 4, of: 4, speed: 180000, ref_speed: 2400000, slow: true, at: 0 } }),
+    speed_test: () => ({ youtube: 3100000, reference: 4200000, slow: false, soundcloud_ok: 4, soundcloud_of: 4, soundcloud_ms: 640 }),
     install_update: () => { throw 'в браузере обновление недоступно'; },
     tg_test: () => [[2, { Ok: 340 }], [4, { Ok: 370 }], [1, { Err: 'заблокирован по IP' }]],
     diagnose: ({ host }) => ({ host, ips: ['142.251.150.4'], verdict: 'dpi', direct_path: true,
@@ -142,7 +148,7 @@ const PAGE_TITLES = {
   diag: 'Диагностика', general: 'Настройки', dev: 'Разработчик', about: 'О программе',
 };
 
-const state = { saved: null, settings: null, presets: [], strategies: [], status: null, busy: false };
+const state = { saved: null, settings: null, presets: [], strategies: [], status: null, busy: false, health: {} };
 
 /* ---------- Тема и внешний вид ---------- */
 function contrastText(hex) {
@@ -254,7 +260,12 @@ function renderHero() {
   $('#driver-banner').classList.toggle('hidden', !TAURI || sys.driver_found);
   $('#hero-chips').innerHTML = state.presets
     .filter((p) => state.settings.enabled_presets.includes(p.id))
-    .map((p) => `<span class="chip">${icon(p.icon)}${esc(p.name)}</span>`).join('');
+    .map((p) => {
+      const h = on && state.health[p.id];
+      const cls = h && h.ok < h.of ? ' down' : h && h.slow ? ' slow' : '';
+      const note = cls === ' down' ? '<em>не открывается</em>' : cls === ' slow' ? '<em>медленно</em>' : '';
+      return `<span class="chip${cls}">${icon(p.icon)}${esc(p.name)}${note}</span>`;
+    }).join('');
   const pill = $('#tb-status');
   pill.classList.toggle('on', on);
   pill.lastElementChild.textContent = on ? 'Включён' : 'Выключен';
@@ -378,7 +389,11 @@ async function renderConflicts() {
 }
 
 /* ---------- Автоподбор ---------- */
-const AT_PRESETS = ['youtube', 'discord', 'general', 'roblox', 'social', 'universal'];
+const AT_PRESETS = ['youtube', 'discord', 'soundcloud', 'general', 'roblox', 'social', 'universal'];
+/** Байт/с → «3.4 МБ/с». */
+function fmtSpeed(v) {
+  return v >= 1048576 ? `${(v / 1048576).toFixed(1)} МБ/с` : `${Math.round(v / 1024)} КБ/с`;
+}
 let atRunning = false;
 function renderAutotunePresets() {
   const sel = $('#at-preset'), cur = sel.value;
@@ -393,7 +408,7 @@ function atRow(p) {
     <span class="st">${mark}</span>
     <div><b>${esc(p.strategy_name)}</b><small>${p.strategy === 'baseline' ? 'проверка без обхода' : esc(p.strategy)}</small></div>
     <div class="bar"><i style="width:${(p.ok / p.of) * 100}%"></i></div>
-    <span class="n">${p.ok}/${p.of} · ${(p.ms / 1000).toFixed(1)} с</span>
+    <span class="n">${p.ok}/${p.of} · ${(p.ms / 1000).toFixed(1)} с${p.speed != null ? `<small>${fmtSpeed(p.speed)}</small>` : ''}</span>
   </div>`;
 }
 async function startAutotune() {
@@ -429,6 +444,7 @@ async function onTuneDone(ev) {
     const o = ev.result.Ok;
     if (o && o.best) toast(`Самолечение: ${presetName(o.preset)} → «${o.best_name}»`);
     else toast(`Самолечение: для ${presetName(o ? o.preset : '')} новой стратегии не нашлось`);
+    renderHealLog();
     return refreshOverrides();
   }
   return onAutotuneDone(ev.result);
@@ -634,6 +650,63 @@ async function fixSite() {
   $('#fix-host').value = '';
   toast(`${host} добавлен в «Свои домены» — подбираем обход…`);
   tunePreset('universal');
+}
+
+/* ---------- Скорость и самолечение ---------- */
+async function runSpeedTest() {
+  const out = $('#speed-out'), b = $('#speed-run');
+  out.classList.remove('hidden');
+  out.innerHTML = '<span class="spin"></span> Измеряем…';
+  b.disabled = true;
+  try {
+    const r = await call('speed_test');
+    const yt = r.youtube == null ? '<span>не удалось измерить</span>' : r.youtube === 0 ? '<span>не загружается</span>' : `<span>${fmtSpeed(r.youtube)}</span>`;
+    const verdict = r.youtube === 0 ? ['ip', 'Видео не грузится'] : r.slow ? ['dpi', 'Видео тормозит'] : ['ok', 'Видео в порядке'];
+    out.innerHTML = `<span class="verdict ${verdict[0]}">${verdict[1]}</span>
+      <div><b>YouTube</b> · ${yt}${r.reference ? ` · <span>канал</span> <span>${fmtSpeed(r.reference)}</span>` : ''}</div>
+      <div><b>SoundCloud</b> · <span>открылось</span> ${r.soundcloud_ok}/${r.soundcloud_of}${r.soundcloud_ok ? ` · ${(r.soundcloud_ms / 1000).toFixed(1)} с` : ''}</div>
+      ${r.slow || r.youtube === 0 ? '<small>Запустите автоподбор для YouTube — он теперь выбирает стратегию по скорости видео.</small>' : ''}`;
+  } catch (e) {
+    out.innerHTML = `<span class="verdict ip">Ошибка</span><div>${esc(String(e))}</div>`;
+  }
+  b.disabled = false;
+}
+const HEAL_REASON = { retrans: 'соединения не проходили', watch: 'не открывался', slow: 'видео тормозило', network: 'сменилась сеть', manual: 'автоподбор' };
+const HEAL_RESULT = { fixed: 'переключили', not_found: 'лучше не нашлось', false_alarm: 'перепроверили — работает', known: 'взяли рабочую для этой сети' };
+function stratName(id) { return (state.strategies.find((s) => s.id === id) || {}).name || id; }
+async function renderHealLog() {
+  let list = [];
+  try { list = await call('heal_history'); } catch {}
+  const box = $('#heal-log');
+  if (!list.length) { box.innerHTML = '<div class="card"><small>Пока ничего не ломалось.</small></div>'; return; }
+  const now = Date.now() / 1000;
+  box.innerHTML = list.map((e) => {
+    const ago = Math.max(0, Math.round((now - e.at) / 60));
+    const tm = ago < 60 ? `${ago} мин` : `${Math.floor(ago / 60)} ч`;
+    const ok = e.result === 'fixed' || e.result === 'known' || e.result === 'false_alarm';
+    return `<div class="card heal-row"><span class="tm">${tm}</span>
+      <div><b>${esc(presetName(e.preset))}</b> · <span>${HEAL_REASON[e.reason] || esc(e.reason)}</span>${e.to ? `<small>${esc(stratName(e.from || ''))} → ${esc(stratName(e.to))}</small>` : ''}</div>
+      <span class="res" style="color:var(${ok ? '--ok' : '--warn'})">${HEAL_RESULT[e.result] || esc(e.result)}</span></div>`;
+  }).join('');
+}
+async function refreshHealth() {
+  try { state.health = await call('preset_health'); } catch { state.health = {}; }
+  if (!state.busy) renderHero();
+}
+/** Рабочие стратегии этого провайдера — в GitHub Issues, оттуда они попадают в общую базу. */
+function shareStrategies() {
+  const isp = ispInfo && ispInfo.isp;
+  if (!isp) return toast('Провайдер не определён — делиться нечем');
+  const rows = state.settings.enabled_presets.map((id) => {
+    const o = state.settings.strategy_override.find(([p]) => p === id);
+    const p = state.presets.find((x) => x.id === id);
+    const sid = o ? o[1] : p && p.strategies[0];
+    return `- ${id}: ${sid}${o ? '' : ' (по умолчанию)'}`;
+  });
+  const title = `Стратегии: ${isp.name} AS${isp.asn}`;
+  const body = [`Провайдер: ${isp.name}`, `AS: ${isp.asn}`, `Версия Proryv: ${$('#about-ver').textContent}`, '', 'Работают:', ...rows].join('\n');
+  call('open_github', { path: `issues/new?labels=strategy&title=${encodeURIComponent(title)}&body=${encodeURIComponent(body)}` })
+    .catch((e) => toast(String(e)));
 }
 
 /* ---------- Отчёт для помощи ---------- */
@@ -1072,6 +1145,8 @@ async function init() {
   $('#fix-host').addEventListener('keydown', (e) => e.key === 'Enter' && fixSite());
   $('#custom-tune').onclick = () => tunePreset('universal');
   $('#diag-report').onclick = diagReport;
+  $('#speed-run').onclick = runSpeedTest;
+  $('#share-strats').onclick = shareStrategies;
   $('#act-import').onclick = importSettings;
   $('#act-export').onclick = exportSettings;
   $('#at-start').onclick = startAutotune;
@@ -1079,11 +1154,15 @@ async function init() {
   $('#diag-host').addEventListener('keydown', (e) => e.key === 'Enter' && runDiagnose());
   onEvent('autotune', onAutotuneProgress);
   onEvent('autotune-done', onTuneDone);
-  onEvent('heal-start', (preset) => toast(`Самолечение: ${presetName(preset)} перестал открываться — подбираем стратегию…`));
+  onEvent('heal-start', (preset) => toast(`Самолечение: ${presetName(preset)} — подбираем стратегию, остальное работает…`));
+  onEvent('heal-log', renderHealLog);
+  onEvent('preset-health', refreshHealth);
+  onEvent('overrides-changed', refreshOverrides);
   onEvent('status', (st) => { state.status = st; renderHero(); });
   onEvent('base-updated', onBaseUpdated);
   call('isp_info').then(renderIsp).catch(() => {});
-  renderAutotunePresets(); renderTunnels(); renderTg();
+  renderAutotunePresets(); renderTunnels(); renderTg(); renderHealLog(); refreshHealth();
+  setInterval(refreshHealth, 30000);
   setInterval(() => { if ($('.page.active')?.dataset.page === 'presets') renderTg(); }, 3000);
   $('#tg-open').onclick = async () => {
     try { await call('tg_open'); toast('Открываем Telegram — подтвердите добавление прокси'); } catch (e) { toast(String(e)); }

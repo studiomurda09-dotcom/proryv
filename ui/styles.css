@@ -290,7 +290,14 @@ html[lang="en"] .toggle:has(input:checked)::after { content: "On"; }
 .content { min-width: 0; }
 .card.row.big { flex-wrap: wrap; }
 .card.row.big select { min-width: 180px; }
-.at-row { display: grid; grid-template-columns: 22px minmax(0, 1fr) 140px 70px; gap: 12px; align-items: center; }
+.at-row { display: grid; grid-template-columns: 22px minmax(0, 1fr) 140px 90px; gap: 12px; align-items: center; }
+.at-row .n small { display: block; }
+.chip.slow { background: rgba(252,185,74,.18); color: var(--warn); }
+.chip.down { background: rgba(255,107,107,.15); color: var(--err); }
+.chip em { font-style: normal; opacity: .85; }
+.heal-row { display: grid; grid-template-columns: 52px minmax(0, 1fr) auto; gap: 12px; align-items: center; font-size: 13px; }
+.heal-row .tm { color: var(--text-2); font-size: 12px; }
+.heal-row .res { font-size: 12px; }
 .at-row .bar { height: 6px; border-radius: 3px; background: var(--control-hover); overflow: hidden; }
 .at-row .bar i { display: block; height: 100%; background: var(--accent); }
 .at-row.best { border-color: var(--accent); }

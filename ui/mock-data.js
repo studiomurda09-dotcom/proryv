@@ -17,6 +17,7 @@ window.MOCK_DATA = {
     "enabled_presets": [
       "youtube",
       "discord",
+      "soundcloud",
       "general"
     ],
     "excluded_domains": [],
@@ -25,10 +26,12 @@ window.MOCK_DATA = {
     "game_ips": [
       "128.116.0.0/17"
     ],
+    "known_good": [],
     "language": "system",
     "minimize_to_tray": true,
     "notifications": true,
     "random_fakes": true,
+    "schema": 1,
     "start_minimized": false,
     "strategy_override": [],
     "telegram": false,
@@ -152,6 +155,38 @@ window.MOCK_DATA = {
       ]
     },
     {
+      "description": "Сайт, приложение и сам аудиопоток (soundcloud.cloud).",
+      "domains": [
+        "soundcloud.com",
+        "sndcdn.com",
+        "soundcloud.cloud"
+      ],
+      "icon": "music",
+      "id": "soundcloud",
+      "ip_id_zero": false,
+      "name": "SoundCloud",
+      "strategies": [
+        "alt11",
+        "fake_multidisorder",
+        "seqovl_4pda",
+        "alt7",
+        "multisplit_host",
+        "faked_split_ts",
+        "host_fake_split",
+        "faked_disorder_ts",
+        "fake_noack_split"
+      ],
+      "tcp_ports": [
+        443
+      ],
+      "udp_ports": [
+        [
+          443,
+          443
+        ]
+      ]
+    },
+    {
       "description": "Сайт, лаунчер и CDN Roblox.",
       "domains": [
         "roblox.com",
@@ -178,7 +213,7 @@ window.MOCK_DATA = {
       "udp_ports": []
     },
     {
-      "description": "Cloudflare, Twitch-эмоуты, DoH, трекеры, SoundCloud, Medium и др.",
+      "description": "Cloudflare, Twitch-эмоуты, DoH, трекеры, Medium, Patreon и др.",
       "domains": [
         "dns.google",
         "dns.quad9.net",
@@ -222,8 +257,6 @@ window.MOCK_DATA = {
         "rutor.is",
         "nnmclub.to",
         "kinozal.tv",
-        "soundcloud.com",
-        "sndcdn.com",
         "medium.com",
         "patreon.com",
         "patreonusercontent.com",
@@ -686,5 +719,5 @@ window.MOCK_DATA = {
       ]
     }
   ],
-  "version": "0.4.0"
+  "version": "0.4.2"
 };

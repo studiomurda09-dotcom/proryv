@@ -23,6 +23,20 @@ fn yes() -> bool {
     true
 }
 
+/// Стратегия, которая сработала в конкретной сети (провайдер или подсеть).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct NetStrategy {
+    pub net: String,
+    pub preset: String,
+    pub strategy: String,
+}
+
+/// Сколько записей «сеть → стратегия» храним.
+const KNOWN_GOOD_CAP: usize = 60;
+
+/// Версия формата настроек: старые файлы без поля получают 0 и обновляются при загрузке.
+const SCHEMA: u32 = 1;
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(default)]
 pub struct Settings {
@@ -71,6 +85,10 @@ pub struct Settings {
     pub notifications: bool,
     pub dev_mode: bool,
     pub custom_strategies: Vec<CustomStrategy>,
+    /// Рабочие стратегии по сетям: сменили Wi-Fi на мобильный — сразу берём ту, что работала там.
+    pub known_good: Vec<NetStrategy>,
+    #[serde(default)]
+    pub schema: u32,
 }
 
 impl Default for Settings {
@@ -84,7 +102,7 @@ impl Default for Settings {
             backdrop: "acrylic".into(),
             accent: "#7cc4e4".into(),
             animations: true,
-            enabled_presets: vec!["youtube".into(), "discord".into(), "general".into()],
+            enabled_presets: vec!["youtube".into(), "discord".into(), "soundcloud".into(), "general".into()],
             strategy_override: vec![],
             auto_heal: true,
             random_fakes: true,
@@ -105,6 +123,8 @@ impl Default for Settings {
             notifications: true,
             dev_mode: false,
             custom_strategies: vec![],
+            known_good: vec![],
+            schema: SCHEMA,
         }
     }
 }
@@ -127,7 +147,38 @@ impl Settings {
         if let Ok(img) = std::fs::read_to_string(sibling(path, ".bg")) {
             s.bg_image = img;
         }
+        s.migrate();
         s
+    }
+
+    /// 0.4.2: SoundCloud выделен из «Прочих заблокированных» в свой пресет.
+    /// У кого были включены «Прочие», тот получает и SoundCloud — с той же стратегией.
+    fn migrate(&mut self) {
+        if self.schema < 1 {
+            if let Some(i) = self.enabled_presets.iter().position(|p| p == "general") {
+                if !self.enabled_presets.iter().any(|p| p == "soundcloud") {
+                    self.enabled_presets.insert(i, "soundcloud".into());
+                }
+                let general = self.strategy_override.iter().find(|(p, _)| p == "general").map(|(_, s)| s.clone());
+                if let (Some(sid), false) = (general, self.strategy_override.iter().any(|(p, _)| p == "soundcloud")) {
+                    self.strategy_override.push(("soundcloud".into(), sid));
+                }
+            }
+        }
+        self.schema = SCHEMA;
+    }
+
+    /// Запомнить, что стратегия сработала в сети `net` (новая запись вытесняет старую).
+    pub fn remember_good(&mut self, net: &str, preset: &str, strategy: &str) {
+        self.known_good.retain(|k| !(k.net == net && k.preset == preset));
+        self.known_good.push(NetStrategy { net: net.into(), preset: preset.into(), strategy: strategy.into() });
+        let extra = self.known_good.len().saturating_sub(KNOWN_GOOD_CAP);
+        self.known_good.drain(..extra);
+    }
+
+    /// Что работало в этой сети для пресета.
+    pub fn good_for(&self, net: &str, preset: &str) -> Option<&str> {
+        self.known_good.iter().find(|k| k.net == net && k.preset == preset).map(|k| k.strategy.as_str())
     }
 
     /// Запись через временный файл: settings.json всегда либо старый, либо новый целиком.
@@ -189,6 +240,37 @@ mod tests {
         Settings { bg_image: String::new(), ..s }.save(&p).unwrap();
         assert!(!sibling(&p, ".bg").exists());
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn old_settings_get_soundcloud_with_general_strategy() {
+        let d = tmp_dir("mig");
+        let p = d.join("settings.json");
+        std::fs::write(&p, r#"{"enabled_presets":["youtube","general"],"strategy_override":[["general","seqovl_4pda"]]}"#).unwrap();
+        let s = Settings::load(&p);
+        assert_eq!(s.enabled_presets, vec!["youtube", "soundcloud", "general"]);
+        assert!(s.strategy_override.contains(&("soundcloud".into(), "seqovl_4pda".into())));
+        assert_eq!(s.schema, SCHEMA);
+        // Новые настройки не трогаем: SoundCloud можно выключить, и он не вернётся.
+        let off = Settings { enabled_presets: vec!["youtube".into()], ..Default::default() };
+        off.save(&p).unwrap();
+        assert_eq!(Settings::load(&p).enabled_presets, vec!["youtube"]);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn known_good_is_per_network_and_capped() {
+        let mut s = Settings::default();
+        s.remember_good("AS1", "youtube", "alt11");
+        s.remember_good("AS2", "youtube", "alt7");
+        s.remember_good("AS1", "youtube", "fake_ts");
+        assert_eq!(s.good_for("AS1", "youtube"), Some("fake_ts"));
+        assert_eq!(s.good_for("AS2", "youtube"), Some("alt7"));
+        assert_eq!(s.good_for("AS3", "youtube"), None);
+        for i in 0..100 {
+            s.remember_good(&format!("AS{i}"), "discord", "alt11");
+        }
+        assert_eq!(s.known_good.len(), KNOWN_GOOD_CAP);
     }
 
     #[test]

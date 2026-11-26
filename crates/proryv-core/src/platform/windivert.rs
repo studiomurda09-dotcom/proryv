@@ -66,7 +66,11 @@ pub fn filter_string(f: &Filter) -> String {
     let mut parts = vec![format!("(tcp and ({ports}) and tcp.PayloadLength > 0)")];
     if f.block_quic {
         let g = super::nets_condition(&super::google_nets());
-        parts.push(format!("(udp and udp.DstPort == 443 and ({g}))"));
+        // К Google — весь QUIC; к остальным — только клиентские Initial (длинный заголовок,
+        // не меньше 1200 байт): по ним движок узнаёт имя сайта, остальной UDP 443 сюда не попадает.
+        parts.push(format!(
+            "(udp and udp.DstPort == 443 and (({g}) or (udp.PayloadLength >= 1200 and udp.Payload[0] >= 192 and udp.Payload[0] <= 207)))"
+        ));
     }
     if !f.udp_ranges.is_empty() {
         let r = f.udp_ranges.iter().map(|(a, b)| format!("(udp.DstPort >= {a} and udp.DstPort <= {b})")).collect::<Vec<_>>().join(" or ");
